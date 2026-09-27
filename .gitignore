@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project temporary and scratch directories
+scratch/
+tmp/
+
+# Serena AI Assistant
+.serena/
+
+# Local data & artifacts
+data/
+artifacts/

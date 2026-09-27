@@ -1,0 +1,119 @@
+[project]
+name = "k-equity-research"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+    "data", 
+    "scratch",
+    "logs", 
+    ".pytest_cache", 
+    ".git",
+    ".venv",
+    "tools",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "N", # PEP8, Pyflakes, Import, Naming
+    "B",    # Bugbear
+    "S",    # Bandit (Security)
+    "PERF", # Perflint (Performance)
+    "RUF",  # Ruff-specific
+    "UP",   # pyupgrade
+    "C4",   # flake8-comprehensions
+    "PT",   # flake8-pytest-style
+    "SIM",  # flake8-simplify
+    "TID",  # flake8-tidy-imports
+    "ASYNC", # flake8-async
+    "T20",  # flake8-print
+    "ARG",  # flake8-unused-arguments
+]
+ignore = [
+    "S101",   # Allow assert (essential for testing and invariant checks)
+    "E741",   # Allow single-letter variables when unambiguous in local scope
+    "E501",   # Ignore line length violations (handled by formatters)
+    "ARG001", # Allow unused function arguments (interface compliance)
+    "ARG002", # Allow unused method arguments (interface compliance)
+    "ARG004", # Allow unused static method arguments
+    "ARG005", # Allow unused lambda arguments
+    "RUF100", # Allow unused noqa directives
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "E402", "N802", "N803", "N806", "N813", "N814", "ARG", "I001", "RUF059", "F841"]
+"tools/agent_skills/lean_check.py" = ["T20", "S607", "S603"]
+"tools/agent_skills/gen_code_map.py" = ["T20"]
+"tools/agent_skills/sync_task.py" = ["T20", "S607", "S110"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.mypy]
+strict = true
+explicit_package_bases = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+show_error_codes = true
+ignore_missing_imports = true
+exclude = [
+    "data", 
+    "scratch",
+    "logs", 
+    ".pytest_cache", 
+    ".git",
+    ".venv",
+    "^tests/.*/conftest\\.py$",
+]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+[tool.pyright]
+exclude = [
+    "data", 
+    "logs", 
+    ".pytest_cache", 
+    ".git",
+    ".venv"
+]
+
+[tool.uv]
+cache-dir = "tmp/uv-cache"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q --import-mode=importlib -m \"not slow\""
+pythonpath = ["."]
+markers = [
+    "slow: long-running integration or external feed tests",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.0.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.15.12",
+]
