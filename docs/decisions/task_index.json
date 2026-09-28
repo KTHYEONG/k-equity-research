@@ -1,0 +1,15 @@
+{
+  "tasks": [
+    {
+      "task_id": "TASK_EQUITY_RESEARCH_V1",
+      "date": "2026-09-28",
+      "adr_id": "ADR_20260928_EQUITY_RESEARCH_V1",
+      "domain": "data-research",
+      "title": "Korean equity event research platform V1",
+      "why": "완료된 구현과 재검토된 경로 안전성·재현성 결정을 프로젝트 기록에 남긴다.",
+      "resolution": "로컬 데이터 파이프라인, DART·KRX 수집, PIT 리서치, 에이전트 평가 및 배치 운영을 구현하고 로컬 경로와 평가 인덱스 버전을 고정했다.",
+      "impact": "프로젝트 독립 실행과 증거 기반 재현 평가를 지원하며 전체 품질 게이트가 통과했다.",
+      "caveat": "평가 케이스는 index_manifest_hash를 지정해야 하며 외부 데이터 소스는 프로젝트 내부로 검증 복사한 뒤 사용한다."
+    }
+  ]
+}

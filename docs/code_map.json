@@ -1,5 +1,9 @@
 {
   "src/config/settings.py": {
     "testing": "tests/unit/config/test_settings.py"
+  },
+  "src/eval/replay.py": {
+    "architecture": "docs/project-development-plan.md",
+    "testing": "tests/unit/eval/test_replay.py"
   }
 }

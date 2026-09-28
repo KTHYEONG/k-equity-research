@@ -1,0 +1,417 @@
+"""Command-line interface for k-equity-research."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+
+from src.data.catalog import Catalog
+from src.data.drive_stage import ArchiveLimits, stage_drive_file, stage_selected_tar_members
+from src.data.imports import import_dataset, import_financial_evidence
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_LIMITS = ArchiveLimits()
+
+
+def project_data_root() -> Path:
+    """Return this repository's project-local data directory."""
+    return PROJECT_ROOT / "data"
+
+
+def open_catalog(data_root: Path) -> Catalog:
+    """Construct the shared local catalog after validating the project data root."""
+    catalog = Catalog(data_root / "catalog.sqlite")
+    return catalog
+
+
+def _resolve_data_root(override: str | None) -> Path:
+    root = Path(override) if override else project_data_root()
+    resolved = root.resolve()
+    if resolved != PROJECT_ROOT.resolve() and PROJECT_ROOT.resolve() not in resolved.parents:
+        raise ValueError(f"data root must stay inside this repository: {root}")
+    return resolved
+
+
+def _add_data_root(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--data-root", default=None, help="Project-local data root (defaults to ./data).")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Create the equity-research argument parser."""
+    parser = argparse.ArgumentParser(prog="equity-research")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    data = subparsers.add_parser("data", help="Project-local data operations.")
+    data_sub = data.add_subparsers(dest="data_command", required=True)
+    importer = data_sub.add_parser("import", help="Import verified source partitions.")
+    importer.add_argument("--source-dataset", required=True)
+    importer.add_argument("--parts", nargs="+", required=True)
+    _add_data_root(importer)
+    evidence = data_sub.add_parser("import-evidence", help="Import cited financial evidence.")
+    evidence.add_argument("--source-receipt-dir", required=True)
+    evidence.add_argument("--source-hash", required=True)
+    _add_data_root(evidence)
+    staged = data_sub.add_parser("stage-drive", help="Stage one quant-lake object.")
+    staged.add_argument("--remote-uri", required=True)
+    staged.add_argument("--expected-sha256", required=True)
+    _add_data_root(staged)
+    extracted = data_sub.add_parser("extract-archive", help="Extract verified archive members.")
+    extracted.add_argument("--archive", required=True)
+    extracted.add_argument("--member", action="append", default=[], help="member=sha256 entries.")
+    extracted.add_argument("--max-member-bytes", type=int, default=_DEFAULT_LIMITS.max_member_bytes)
+    extracted.add_argument("--max-selected-bytes", type=int, default=_DEFAULT_LIMITS.max_selected_bytes)
+    _add_data_root(extracted)
+    research = subparsers.add_parser("research", help="Source-backed research operations.")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+    memo = research_sub.add_parser("memo", help="Assemble one receipt-specific research view.")
+    memo.add_argument("--rcept-no", required=True)
+    memo.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T09:00:00+09:00.")
+    memo.add_argument("--index-manifest", required=True)
+    memo.add_argument("--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback.")
+    memo.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
+    memo.add_argument("--agent-model", default="local-7b-q4")
+    memo.add_argument("--agent-timeout-seconds", type=float, default=30.0)
+    memo.add_argument("--agent-max-calls", type=int, default=3)
+    memo.add_argument("--agent-prompt-version", default="v1")
+    _add_data_root(memo)
+    evaluation = subparsers.add_parser("eval", help="Frozen replay and stratified evaluation.")
+    eval_sub = evaluation.add_subparsers(dest="eval_command", required=True)
+    replay = eval_sub.add_parser("replay", help="Replay pinned cases and aggregate stratified quality.")
+    replay.add_argument("--cases", required=True, help="Local reviewed labels file, e.g. data/eval/cases.json.")
+    replay.add_argument("--agent", action="store_true", help="Replay with the local model; baseline stays the fallback.")
+    replay.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
+    replay.add_argument("--agent-model", default="local-7b-q4")
+    replay.add_argument("--agent-timeout-seconds", type=float, default=30.0)
+    replay.add_argument("--agent-max-calls", type=int, default=3)
+    replay.add_argument("--agent-prompt-version", default="v1")
+    _add_data_root(replay)
+    batch = subparsers.add_parser("batch", help="Recoverable daily batch operations.")
+    batch_sub = batch.add_subparsers(dest="batch_command", required=True)
+    daily = batch_sub.add_parser("daily", help="Collect new receipts/index days and publish memos atomically.")
+    daily.add_argument("--dart-start", required=True, help="Primary DART window start YYYY-MM-DD.")
+    daily.add_argument("--dart-end", required=True, help="Primary DART window end YYYY-MM-DD.")
+    daily.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T18:30:00+09:00.")
+    daily.add_argument("--recheck-days", type=int, default=365)
+    daily.add_argument("--publish-time", default="18:30", help="Daily KST orchestration time HH:MM.")
+    daily.add_argument("--max-attempts", type=int, default=3)
+    daily.add_argument("--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback.")
+    daily.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
+    daily.add_argument("--agent-model", default="local-7b-q4")
+    daily.add_argument("--agent-timeout-seconds", type=float, default=30.0)
+    daily.add_argument("--agent-max-calls", type=int, default=3)
+    daily.add_argument("--agent-prompt-version", default="v1")
+    _add_data_root(daily)
+    return parser
+
+
+def _run_import(args: argparse.Namespace) -> int:
+    root = _resolve_data_root(args.data_root)
+    manifest = import_dataset(
+        Path(args.source_dataset),
+        [PurePosixPath(part) for part in args.parts],
+        root,
+    )
+    sys.stdout.write(
+        json.dumps(
+            {
+                "manifest": str(root / "imports" / manifest.dataset_id / "manifest.json"),
+                "dataset_id": manifest.dataset_id,
+                "parts": len(manifest.parts),
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_import_evidence(args: argparse.Namespace) -> int:
+    payload, receipt = import_financial_evidence(
+        Path(args.source_receipt_dir), args.source_hash, _resolve_data_root(args.data_root)
+    )
+    sys.stdout.write(json.dumps({"payload": str(payload), "receipt": str(receipt)}) + "\n")
+    return 0
+
+
+def _run_stage_drive(args: argparse.Namespace) -> int:
+    staged = stage_drive_file(args.remote_uri, args.expected_sha256, _resolve_data_root(args.data_root))
+    sys.stdout.write(json.dumps({"staged": str(staged)}) + "\n")
+    return 0
+
+
+def _run_extract_archive(args: argparse.Namespace) -> int:
+    members: dict[PurePosixPath, str] = {}
+    for entry in args.member:
+        name, separator, digest = entry.partition("=")
+        if not separator or not name or not digest:
+            raise ValueError(f"invalid member entry: {entry!r}")
+        members[PurePosixPath(name)] = digest
+    limits = ArchiveLimits(max_member_bytes=args.max_member_bytes, max_selected_bytes=args.max_selected_bytes)
+    parts = stage_selected_tar_members(
+        Path(args.archive), members, _resolve_data_root(args.data_root), limits
+    )
+    sys.stdout.write(json.dumps({"members": len(parts), "paths": [str(path) for path in parts]}) + "\n")
+    return 0
+
+
+def _atomic_write_bytes(data_root: Path, target: Path, payload: bytes) -> None:
+    """Write one local file atomically without exposing a partial report."""
+    from src.data.local_paths import checked_data_path
+
+    target = checked_data_path(data_root, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise ValueError(f"refusing symlinked report destination: {target}")
+    partial = checked_data_path(data_root, target.with_name(target.name + ".partial"))
+    partial.write_bytes(payload)
+    import os
+
+    os.replace(partial, target)
+
+
+def _run_research_memo(args: argparse.Namespace) -> int:
+    import hashlib
+    from zoneinfo import ZoneInfo
+
+    from src.data.event_store import EventStore
+    from src.data.financial_evidence import FinancialEvidence
+    from src.data.imports import ImportManifest, ImportPart
+    from src.data.index_store import IndexStore, load_index_manifest
+    from src.data.local_lake import LocalLake
+    from src.data.local_paths import checked_data_path, checked_local_path
+    from src.research.context import ResearchUnavailable, build_research_context
+    from src.research.event_study import StudyPolicy
+    from src.research.memo import build_baseline_memo, memo_to_dict, render_markdown
+
+    root = _resolve_data_root(args.data_root)
+    catalog = open_catalog(root)
+    manifests: dict[str, ImportManifest] = {}
+    imports_root = checked_local_path(root, PurePosixPath("imports"))
+    if imports_root.is_dir():
+        for child in sorted(imports_root.iterdir()):
+            manifest_path = checked_data_path(root, child / "manifest.json")
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                continue
+            try:
+                document = json.loads(manifest_path.read_bytes().decode("utf-8"))
+                manifests[str(document["dataset_id"])] = ImportManifest(
+                    dataset_id=str(document["dataset_id"]),
+                    source_manifest_sha256=str(document["source_manifest_sha256"]),
+                    imported_at=datetime.fromisoformat(str(document["imported_at"])),
+                    parts=tuple(
+                        ImportPart(
+                            relative_path=PurePosixPath(str(item["path"])),
+                            sha256=str(item["sha256"]),
+                            byte_length=int(item["bytes"]),
+                        )
+                        for item in document["parts"]
+                    ),
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError(f"invalid local manifest: {manifest_path}") from exc
+    lake = LocalLake(root, manifests)
+    financial = FinancialEvidence(root, lake)
+    event_store = EventStore(catalog)
+    manifest = load_index_manifest(root, args.index_manifest)
+    index_store = IndexStore(catalog, root, manifest)
+    as_of = datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as-of instant must be timezone-aware")
+    try:
+        context = build_research_context(
+            catalog, event_store, lake, financial, index_store, args.rcept_no, as_of, StudyPolicy()
+        )
+    except ResearchUnavailable as exc:
+        sys.stderr.write(f"unavailable: {exc.reason_code}\n")
+        return 3
+    memo = build_baseline_memo(context)
+    markdown = render_markdown(memo)
+    if args.agent:
+        import httpx
+
+        from src.agent.local_model import LlamaCppClient
+        from src.agent.workflow import AgentPolicy, AgentRunner
+
+        http_client = httpx.Client()
+        try:
+            model_client = LlamaCppClient(
+                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client
+            )
+            agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
+            memo = AgentRunner().run(context, memo, model_client, agent_policy)
+        finally:
+            http_client.close()
+        markdown = render_markdown(memo)
+    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
+    run_id = f"{context.active_rcept_no}-{stamp}"
+    relative_dir = PurePosixPath(f"reports/{context.event.event_id}/{run_id}")
+    run_dir = root / relative_dir.as_posix()
+    memo_payload = (json.dumps(memo_to_dict(memo), sort_keys=True, indent=2) + "\n").encode("utf-8")
+    markdown_payload = markdown.encode("utf-8")
+    _atomic_write_bytes(root, run_dir / "memo.json", memo_payload)
+    _atomic_write_bytes(root, run_dir / "memo.md", markdown_payload)
+    run_manifest = {
+        "event_id": context.event.event_id,
+        "manifest_hash": memo.manifest_hash,
+        "memo_sha256": hashlib.sha256(memo_payload).hexdigest(),
+        "markdown_sha256": hashlib.sha256(markdown_payload).hexdigest(),
+        "run_id": run_id,
+    }
+    manifest_payload = (json.dumps(run_manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    _atomic_write_bytes(root, run_dir / "manifest.json", manifest_payload)
+    catalog.register_research_run(
+        run_id, hashlib.sha256(manifest_payload).hexdigest(), "COMPLETE", relative_dir / "manifest.json"
+    )
+    sys.stdout.write(
+        json.dumps(
+            {
+                "anchor_rcept_no": context.anchor_rcept_no,
+                "active_rcept_no": context.active_rcept_no,
+                "manifest_hash": memo.manifest_hash,
+                "markdown": str(run_dir / "memo.md"),
+                "materiality": context.materiality.status,
+                "memo": str(run_dir / "memo.json"),
+                "run_id": run_id,
+                "study": context.study.status,
+                "comparables": context.comparables.status,
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_eval_replay(args: argparse.Namespace) -> int:
+    from src.eval.replay import evaluate_cases, load_cases, render_report_markdown, report_to_dict
+
+    root = _resolve_data_root(args.data_root)
+    from src.data.local_paths import checked_data_path
+
+    cases = load_cases(checked_data_path(root, Path(args.cases)))
+    if args.agent:
+        import httpx
+
+        from src.agent.local_model import LlamaCppClient
+        from src.agent.workflow import AgentPolicy
+
+        http_client = httpx.Client()
+        try:
+            model_client = LlamaCppClient(
+                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client
+            )
+            agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
+            report = evaluate_cases(cases, root, model_client, agent_policy)
+        finally:
+            http_client.close()
+    else:
+        report = evaluate_cases(cases, root)
+    run_dir = root / "eval" / "runs" / report.run_id
+    report_payload = (json.dumps(report_to_dict(report), sort_keys=True, indent=2) + "\n").encode("utf-8")
+    markdown_payload = render_report_markdown(report).encode("utf-8")
+    _atomic_write_bytes(root, run_dir / "report.json", report_payload)
+    _atomic_write_bytes(root, run_dir / "report.md", markdown_payload)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "case_count": report.case_count,
+                "markdown": str(run_dir / "report.md"),
+                "report": str(run_dir / "report.json"),
+                "run_id": report.run_id,
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_batch_daily(args: argparse.Namespace) -> int:
+    from datetime import date, time
+
+    from src.cli.batch import BatchPolicy, run_daily_batch
+
+    root = _resolve_data_root(args.data_root)
+    dart_start = date.fromisoformat(args.dart_start)
+    dart_end = date.fromisoformat(args.dart_end)
+    hour_text, _, minute_text = args.publish_time.partition(":")
+    publish_time = time(int(hour_text), int(minute_text) if minute_text else 0)
+    # Development-plan defaults are wired here, not hidden in domain code:
+    # daily 18:30 KST orchestration, recent-year recheck, bounded retry budget.
+    batch_policy = BatchPolicy(
+        dart_start=dart_start,
+        dart_end=dart_end,
+        recheck_days=args.recheck_days,
+        publish_time_kst=publish_time,
+        max_attempts=args.max_attempts,
+    )
+    as_of = datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as-of instant must be timezone-aware")
+    project_data_root = root
+    if args.agent:
+        import httpx
+
+        from src.agent.local_model import LlamaCppClient
+        from src.agent.workflow import AgentPolicy
+
+        http_client = httpx.Client()
+        try:
+            model_client = LlamaCppClient(
+                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client
+            )
+            agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
+            summary = run_daily_batch(
+                batch_policy, project_data_root, as_of, agent_mode=args.agent,
+                agent_model=model_client, agent_policy=agent_policy,
+            )
+        finally:
+            http_client.close()
+    else:
+        summary = run_daily_batch(batch_policy, project_data_root, as_of, agent_mode=args.agent)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "artifacts_registered": summary.artifacts_registered,
+                "events_linked": summary.events_linked,
+                "failures": list(summary.failures),
+                "manifest_hash": summary.manifest_hash,
+                "memos_published": summary.memos_published,
+                "memos_withheld": summary.memos_withheld,
+                "run_id": summary.run_id,
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the equity-research CLI and return a process exit code."""
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        open_catalog(_resolve_data_root(getattr(args, "data_root", None)))
+        if args.command == "data" and args.data_command == "import":
+            return _run_import(args)
+        if args.command == "data" and args.data_command == "import-evidence":
+            return _run_import_evidence(args)
+        if args.command == "data" and args.data_command == "stage-drive":
+            return _run_stage_drive(args)
+        if args.command == "data" and args.data_command == "extract-archive":
+            return _run_extract_archive(args)
+        if args.command == "research" and args.research_command == "memo":
+            return _run_research_memo(args)
+        if args.command == "eval" and args.eval_command == "replay":
+            return _run_eval_replay(args)
+        if args.command == "batch" and args.batch_command == "daily":
+            return _run_batch_daily(args)
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    parser.error("unsupported command")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

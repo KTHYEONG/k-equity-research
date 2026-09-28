@@ -224,6 +224,6 @@ tmp/
 # Serena AI Assistant
 .serena/
 
-# Local data & artifacts
-data/
-artifacts/
+# Local data & artifacts (top-level only; src/data and tests fixtures must stay tracked)
+/data/
+/artifacts/
