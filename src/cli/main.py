@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 
 from src.data.catalog import Catalog
@@ -54,6 +54,28 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--source-receipt-dir", required=True)
     evidence.add_argument("--source-hash", required=True)
     _add_data_root(evidence)
+    lineage = data_sub.add_parser("register-lineage", help="Register imported source payloads in the local catalog.")
+    lineage.add_argument("--dataset-id", required=True)
+    lineage.add_argument("--kind", required=True, choices=("daily_market", "security_master"))
+    lineage.add_argument("--source-root", required=True, help="Source Bronze root used only during this import.")
+    _add_data_root(lineage)
+    retain = data_sub.add_parser("retain-build", help="Build verified time-scoped research datasets.")
+    _add_data_root(retain)
+    backfill = data_sub.add_parser("backfill-index", help="Backfill official KOSPI/KOSDAQ bars for retained sessions.")
+    backfill.add_argument("--start", required=True, help="Retained interval start YYYY-MM-DD.")
+    backfill.add_argument("--end", required=True, help="Retained interval end YYYY-MM-DD.")
+    _add_data_root(backfill)
+    dart_backfill = data_sub.add_parser(
+        "backfill-dart", help="Backfill official buyback disclosures by calendar month."
+    )
+    dart_backfill.add_argument("--start", required=True, help="History start YYYY-MM-DD (2023-01-01 or later).")
+    dart_backfill.add_argument("--end", required=True, help="History end YYYY-MM-DD (inclusive).")
+    _add_data_root(dart_backfill)
+    disclosure = data_sub.add_parser(
+        "collect-disclosure-context", help="Collect all-category DART evidence around accepted event windows."
+    )
+    disclosure.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T09:00:00+09:00.")
+    _add_data_root(disclosure)
     staged = data_sub.add_parser("stage-drive", help="Stage one quant-lake object.")
     staged.add_argument("--remote-uri", required=True)
     staged.add_argument("--expected-sha256", required=True)
@@ -70,7 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     memo.add_argument("--rcept-no", required=True)
     memo.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T09:00:00+09:00.")
     memo.add_argument("--index-manifest", required=True)
-    memo.add_argument("--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback.")
+    memo.add_argument(
+        "--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback."
+    )
     memo.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
     memo.add_argument("--agent-model", default="local-7b-q4")
     memo.add_argument("--agent-timeout-seconds", type=float, default=30.0)
@@ -81,7 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     eval_sub = evaluation.add_subparsers(dest="eval_command", required=True)
     replay = eval_sub.add_parser("replay", help="Replay pinned cases and aggregate stratified quality.")
     replay.add_argument("--cases", required=True, help="Local reviewed labels file, e.g. data/eval/cases.json.")
-    replay.add_argument("--agent", action="store_true", help="Replay with the local model; baseline stays the fallback.")
+    replay.add_argument(
+        "--agent", action="store_true", help="Replay with the local model; baseline stays the fallback."
+    )
     replay.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
     replay.add_argument("--agent-model", default="local-7b-q4")
     replay.add_argument("--agent-timeout-seconds", type=float, default=30.0)
@@ -97,7 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--recheck-days", type=int, default=365)
     daily.add_argument("--publish-time", default="18:30", help="Daily KST orchestration time HH:MM.")
     daily.add_argument("--max-attempts", type=int, default=3)
-    daily.add_argument("--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback.")
+    daily.add_argument(
+        "--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback."
+    )
     daily.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
     daily.add_argument("--agent-model", default="local-7b-q4")
     daily.add_argument("--agent-timeout-seconds", type=float, default=30.0)
@@ -135,6 +163,192 @@ def _run_import_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_register_lineage(args: argparse.Namespace) -> int:
+    from src.data.lineage_import import register_imported_lineage
+
+    count = register_imported_lineage(
+        _resolve_data_root(args.data_root),
+        args.dataset_id,
+        args.kind,
+        Path(args.source_root) if args.source_root else None,
+    )
+    sys.stdout.write(json.dumps({"dataset_id": args.dataset_id, "source_hashes": count}) + "\n")
+    return 0
+
+
+def _run_retain_build(args: argparse.Namespace) -> int:
+    from src.data.retention import materialize_research_scope
+
+    summary = materialize_research_scope(data_root=_resolve_data_root(args.data_root))
+    sys.stdout.write(
+        json.dumps(
+            {
+                "dataset_ids": list(summary.dataset_ids),
+                "source_rows": dict(summary.source_rows),
+                "retained_rows": dict(summary.retained_rows),
+                "source_bytes": dict(summary.source_bytes),
+                "retained_bytes": dict(summary.retained_bytes),
+                "provenance": str(summary.provenance_path),
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_backfill_index(args: argparse.Namespace) -> int:
+    import os as _os
+
+    import httpx
+
+    from src.cli.batch import _load_previous_manifest, _read_import_manifests
+    from src.data.krx_ingest import collect_index_sessions
+    from src.data.local_lake import LocalLake
+    from src.integrations.krx_index import KrxIndexClient
+
+    api_key = _os.environ.get("KRX_OPENAPI_KEY") or _os.environ.get("KRX_API_KEY", "")
+    if not api_key:
+        raise ValueError("KRX API key must be set (KRX_OPENAPI_KEY)")
+    root = _resolve_data_root(args.data_root)
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end)
+    snapshot_id = f"index-backfill-{start.isoformat()}-{end.isoformat()}"
+    catalog = open_catalog(root)
+    lake = LocalLake(root, _read_import_manifests(root))
+    previous = _load_previous_manifest(root)
+    http_client = httpx.Client(timeout=30.0)
+    try:
+        summary = collect_index_sessions(
+            KrxIndexClient(api_key, http_client), catalog, lake, previous, start, end, root, snapshot_id
+        )
+    finally:
+        http_client.close()
+    sys.stdout.write(
+        json.dumps(
+            {
+                "expected_keys": summary.expected_keys,
+                "reused_keys": summary.reused_keys,
+                "fetched_keys": summary.fetched_keys,
+                "unresolved_keys": list(summary.unresolved_keys),
+                "manifest_hash": summary.manifest_hash,
+                "manifest": str(root / "krx" / "manifests" / f"{summary.manifest_hash}.json"),
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_backfill_dart(args: argparse.Namespace) -> int:
+    import os as _os
+
+    import httpx
+
+    from src.cli.batch import _read_import_manifests
+    from src.core.buyback_document import DocumentLimits
+    from src.data.dart_ingest import collect_buyback_history
+    from src.data.event_store import EventStore
+    from src.data.local_lake import LocalLake
+    from src.integrations.dart import DartClient
+
+    api_key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    if not api_key:
+        raise ValueError("DART API key must be set (OPENDART_API_KEY)")
+    root = _resolve_data_root(args.data_root)
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end)
+    snapshot_id = f"dart-backfill-{start.isoformat()}-{end.isoformat()}"
+    catalog = open_catalog(root)
+    lake = LocalLake(root, _read_import_manifests(root))
+    event_store = EventStore(catalog)
+    http_client = httpx.Client(timeout=30.0)
+    try:
+        summary = collect_buyback_history(
+            DartClient(api_key, http_client),
+            catalog,
+            lake,
+            start,
+            end,
+            root,
+            snapshot_id,
+            DocumentLimits(),
+            event_store=event_store,
+        )
+    finally:
+        http_client.close()
+    sys.stdout.write(
+        json.dumps(
+            {
+                "documents_fetched": summary.documents_fetched,
+                "documents_reused": summary.documents_reused,
+                "events_accepted": summary.events_accepted,
+                "list_pages_fetched": summary.list_pages_fetched,
+                "list_pages_reused": summary.list_pages_reused,
+                "snapshot_id": snapshot_id,
+                "windows_complete": summary.windows_complete,
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_collect_disclosure_context(args: argparse.Namespace) -> int:
+    import os as _os
+
+    import httpx
+
+    from src.cli.batch import _read_import_manifests
+    from src.data.disclosure_context import collect_event_disclosure_context
+    from src.data.event_store import EventStore
+    from src.data.local_lake import LocalLake
+    from src.integrations.dart import DartClient
+    from src.research.event_study import StudyPolicy
+
+    api_key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    if not api_key:
+        raise ValueError("DART API key must be set (OPENDART_API_KEY)")
+    root = _resolve_data_root(args.data_root)
+    as_of = datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as-of instant must be timezone-aware")
+    from zoneinfo import ZoneInfo
+
+    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
+    snapshot_id = f"disclosure-context-{stamp}"
+    catalog = open_catalog(root)
+    lake = LocalLake(root, _read_import_manifests(root))
+    event_store = EventStore(catalog)
+    http_client = httpx.Client(timeout=30.0)
+    try:
+        summary = collect_event_disclosure_context(
+            DartClient(api_key, http_client),
+            catalog,
+            event_store,
+            lake,
+            StudyPolicy(),
+            root,
+            as_of,
+            snapshot_id,
+        )
+    finally:
+        http_client.close()
+    sys.stdout.write(
+        json.dumps(
+            {
+                "documents_verified": summary.documents_verified,
+                "issuer_windows": summary.issuer_windows,
+                "missing_receipts": list(summary.missing_receipts),
+                "pages_verified": summary.pages_verified,
+                "receipts_discovered": summary.receipts_discovered,
+                "snapshot_id": snapshot_id,
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
 def _run_stage_drive(args: argparse.Namespace) -> int:
     staged = stage_drive_file(args.remote_uri, args.expected_sha256, _resolve_data_root(args.data_root))
     sys.stdout.write(json.dumps({"staged": str(staged)}) + "\n")
@@ -149,9 +363,7 @@ def _run_extract_archive(args: argparse.Namespace) -> int:
             raise ValueError(f"invalid member entry: {entry!r}")
         members[PurePosixPath(name)] = digest
     limits = ArchiveLimits(max_member_bytes=args.max_member_bytes, max_selected_bytes=args.max_selected_bytes)
-    parts = stage_selected_tar_members(
-        Path(args.archive), members, _resolve_data_root(args.data_root), limits
-    )
+    parts = stage_selected_tar_members(Path(args.archive), members, _resolve_data_root(args.data_root), limits)
     sys.stdout.write(json.dumps({"members": len(parts), "paths": [str(path) for path in parts]}) + "\n")
     return 0
 
@@ -362,8 +574,12 @@ def _run_batch_daily(args: argparse.Namespace) -> int:
             )
             agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
             summary = run_daily_batch(
-                batch_policy, project_data_root, as_of, agent_mode=args.agent,
-                agent_model=model_client, agent_policy=agent_policy,
+                batch_policy,
+                project_data_root,
+                as_of,
+                agent_mode=args.agent,
+                agent_model=model_client,
+                agent_policy=agent_policy,
             )
         finally:
             http_client.close()
@@ -396,6 +612,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_import(args)
         if args.command == "data" and args.data_command == "import-evidence":
             return _run_import_evidence(args)
+        if args.command == "data" and args.data_command == "register-lineage":
+            return _run_register_lineage(args)
+        if args.command == "data" and args.data_command == "retain-build":
+            return _run_retain_build(args)
+        if args.command == "data" and args.data_command == "backfill-index":
+            return _run_backfill_index(args)
+        if args.command == "data" and args.data_command == "backfill-dart":
+            return _run_backfill_dart(args)
+        if args.command == "data" and args.data_command == "collect-disclosure-context":
+            return _run_collect_disclosure_context(args)
         if args.command == "data" and args.data_command == "stage-drive":
             return _run_stage_drive(args)
         if args.command == "data" and args.data_command == "extract-archive":
