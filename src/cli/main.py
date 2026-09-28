@@ -76,6 +76,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     disclosure.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T09:00:00+09:00.")
     _add_data_root(disclosure)
+    financial = data_sub.add_parser("collect-financial", help="Collect one official OpenDART financial statement.")
+    financial.add_argument("--corp-code", required=True, help="8-digit OpenDART corp code.")
+    financial.add_argument("--year", required=True, type=int, help="Business year, e.g. 2024.")
+    financial.add_argument("--report-code", required=True, help="Report code: 11011, 11012, 11013, or 11014.")
+    financial.add_argument("--fs-div", required=True, choices=("CFS", "OFS"))
+    financial.add_argument("--snapshot-id", default=None, help="Collection snapshot id (defaults per request).")
+    _add_data_root(financial)
+    audit = data_sub.add_parser("audit-financial", help="Audit event-corp financial evidence and report gaps.")
+    audit.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T09:00:00+09:00.")
+    _add_data_root(audit)
+    cleanup = data_sub.add_parser("retain-cleanup", help="Plan or apply referentially safe local retirement.")
+    cleanup.add_argument("--retire-run-id", action="append", default=[], help="Research run ID to retire.")
+    cleanup.add_argument("--apply", action="store_true", help="Execute a previously displayed plan.")
+    cleanup.add_argument("--plan-digest", default=None, help="Approved plan digest required with --apply.")
+    _add_data_root(cleanup)
     staged = data_sub.add_parser("stage-drive", help="Stage one quant-lake object.")
     staged.add_argument("--remote-uri", required=True)
     staged.add_argument("--expected-sha256", required=True)
@@ -346,6 +361,135 @@ def _run_collect_disclosure_context(args: argparse.Namespace) -> int:
         )
         + "\n"
     )
+    return 0
+
+
+def _run_collect_financial(args: argparse.Namespace) -> int:
+    import os as _os
+    from datetime import UTC
+
+    import httpx
+
+    from src.data.financial_ingest import collect_financial_snapshot
+    from src.integrations.dart import DartClient, FinancialStatementRequest
+
+    api_key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    if not api_key:
+        raise ValueError("DART API key must be set (OPENDART_API_KEY)")
+    root = _resolve_data_root(args.data_root)
+    request = FinancialStatementRequest(
+        corp_code=args.corp_code,
+        bsns_year=int(args.year),
+        reprt_code=args.report_code,
+        fs_div=args.fs_div,
+    )
+    snapshot_id = args.snapshot_id or (
+        f"financial-{request.corp_code.strip()}-{request.bsns_year:04d}"
+        f"-{request.reprt_code.strip()}-{str(request.fs_div).strip()}"
+    )
+    observed_at = datetime.now(UTC)
+    catalog = open_catalog(root)
+    http_client = httpx.Client(timeout=30.0)
+    try:
+        summary = collect_financial_snapshot(
+            DartClient(api_key, http_client), catalog, request, root, snapshot_id, observed_at
+        )
+    finally:
+        http_client.close()
+    sys.stdout.write(
+        json.dumps(
+            {
+                "artifact_sha256": summary.artifact_sha256,
+                "artifact_path": str(summary.artifact_path),
+                "row_count": summary.row_count,
+                "observed_at": summary.observed_at.isoformat(),
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_audit_financial(args: argparse.Namespace) -> int:
+    from zoneinfo import ZoneInfo
+
+    from src.cli.batch import _read_import_manifests
+    from src.data.event_store import EventStore
+    from src.data.financial_evidence import FinancialEvidence
+    from src.data.financial_hydration import hydrate_event_financial_evidence
+    from src.data.local_lake import LocalLake
+
+    root = _resolve_data_root(args.data_root)
+    as_of = datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as-of instant must be timezone-aware")
+    catalog = open_catalog(root)
+    lake = LocalLake(root, _read_import_manifests(root))
+    financial = FinancialEvidence(root, lake)
+    event_store = EventStore(catalog)
+    summary = hydrate_event_financial_evidence(catalog, event_store, financial, root, as_of)
+    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
+    report = {
+        "as_of": as_of.isoformat(),
+        "event_corp_count": summary.event_corp_count,
+        "required_hash_count": summary.required_hash_count,
+        "verified_hash_count": summary.verified_hash_count,
+        "missing_hashes": list(summary.missing_hashes),
+        "missing_requests": [
+            {
+                "corp_code": request.corp_code,
+                "bsns_year": request.bsns_year,
+                "reprt_code": request.reprt_code,
+                "fs_div": request.fs_div,
+            }
+            for request in summary.missing_requests
+        ],
+    }
+    payload = (json.dumps(report, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    relative = PurePosixPath(f"financial_hydration/gap-{stamp}.json")
+    _atomic_write_bytes(root, root / relative.as_posix(), payload)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "event_corp_count": summary.event_corp_count,
+                "required_hash_count": summary.required_hash_count,
+                "verified_hash_count": summary.verified_hash_count,
+                "missing_hashes": list(summary.missing_hashes),
+                "report": str(root / relative.as_posix()),
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _run_retain_cleanup(args: argparse.Namespace) -> int:
+    from src.data.event_store import EventStore
+    from src.data.retention_cleanup import execute_local_retirement, plan_local_retirement
+
+    root = _resolve_data_root(args.data_root)
+    retired = frozenset(str(run_id) for run_id in args.retire_run_id)
+    catalog = open_catalog(root)
+    event_store = EventStore(catalog)
+    plan = plan_local_retirement(root, catalog, event_store, retired)
+    body = {
+        "obsolete_import_parts": len(plan.obsolete_import_parts),
+        "obsolete_raw_artifacts": len(plan.obsolete_raw_artifacts),
+        "obsolete_financial_evidence": len(plan.obsolete_financial_evidence),
+        "blocking_run_ids": list(plan.blocking_run_ids),
+        "retained_bytes": plan.retained_bytes,
+        "reclaimable_bytes": plan.reclaimable_bytes,
+        "plan_digest": plan.plan_digest,
+    }
+    if not args.apply:
+        sys.stdout.write(json.dumps(body) + "\n")
+        return 0
+    if not args.plan_digest:
+        raise ValueError("--plan-digest is required with --apply")
+    sys.stdout.write(json.dumps(body) + "\n")
+    if args.plan_digest != plan.plan_digest:
+        raise ValueError("plan digest changed since approval")
+    execute_local_retirement(plan, root, catalog, retired)
     return 0
 
 
@@ -622,6 +766,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_backfill_dart(args)
         if args.command == "data" and args.data_command == "collect-disclosure-context":
             return _run_collect_disclosure_context(args)
+        if args.command == "data" and args.data_command == "collect-financial":
+            return _run_collect_financial(args)
+        if args.command == "data" and args.data_command == "audit-financial":
+            return _run_audit_financial(args)
+        if args.command == "data" and args.data_command == "retain-cleanup":
+            return _run_retain_cleanup(args)
         if args.command == "data" and args.data_command == "stage-drive":
             return _run_stage_drive(args)
         if args.command == "data" and args.data_command == "extract-archive":

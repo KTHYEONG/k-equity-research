@@ -3,24 +3,37 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 
 from src.data.local_paths import checked_data_path, checked_local_path
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _CHUNK_SIZE = 1024 * 1024
 _HEXDIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def _is_hex64(value: str) -> bool:
     return len(value) == 64 and all(char in _HEXDIGITS for char in value)
+
+
+def _walk_hex_tokens(document: Any) -> Iterator[str]:
+    if isinstance(document, str):
+        if _is_hex64(document):
+            yield document.lower()
+    elif isinstance(document, Mapping):
+        for value in document.values():
+            yield from _walk_hex_tokens(value)
+    elif isinstance(document, (list, tuple)):
+        for value in document:
+            yield from _walk_hex_tokens(value)
 
 
 def _require_aware(value: datetime, label: str) -> None:
@@ -136,6 +149,17 @@ class Catalog:
                 status TEXT NOT NULL,
                 local_path TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS retirement_entry (
+                retirement_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                request_key TEXT NOT NULL,
+                snapshot_id TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                byte_length INTEGER NOT NULL,
+                retired_at TEXT NOT NULL,
+                PRIMARY KEY (retirement_id, source, endpoint, request_key, snapshot_id)
+            );
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL
@@ -148,6 +172,9 @@ class Catalog:
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (_SCHEMA_VERSION, datetime.now().astimezone().isoformat()),
             )
+            self._conn.commit()
+        elif int(row["version"]) == 1:
+            self._conn.execute("UPDATE schema_version SET version=?, applied_at=?", (_SCHEMA_VERSION, datetime.now().astimezone().isoformat()))
             self._conn.commit()
         elif int(row["version"]) != _SCHEMA_VERSION:
             raise ValueError(f"unsupported catalog schema version: {row['version']}")
@@ -428,3 +455,84 @@ class Catalog:
         except BaseException:
             self._abort_or_hold()
             raise
+
+    def references_to_hashes(self, hashes: frozenset[str]) -> Mapping[str, tuple[str, ...]]:
+        """Return exact research-run identifiers that cite candidate hashes.
+
+        Include current and legacy run records; fail when a reference format
+        cannot be decoded rather than treating an unknown record as unreferenced.
+        """
+        wanted = {str(value).lower() for value in hashes if str(value)}
+        if not wanted:
+            return {}
+        rows = self._conn.execute("SELECT run_id, local_path FROM research_run ORDER BY run_id").fetchall()
+        found: dict[str, set[str]] = {}
+        for row in rows:
+            run_id = str(row["run_id"])
+            target = self._resolve_inside(PurePosixPath(str(row["local_path"])))
+            if target.is_symlink() or not target.is_file():
+                raise ValueError(f"unresolvable research run reference: {run_id}")
+            rundir = target.parent
+            for sibling in sorted(rundir.glob("*.json")):
+                if sibling.is_symlink() or not sibling.is_file():
+                    raise ValueError(f"unresolvable research run reference: {run_id}")
+                try:
+                    document = json.loads(sibling.read_bytes().decode("utf-8"))
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise ValueError(f"undecodable research run reference: {run_id}") from exc
+                for token in _walk_hex_tokens(document):
+                    if token in wanted:
+                        found.setdefault(token, set()).add(run_id)
+        return {digest: tuple(sorted(run_ids)) for digest, run_ids in sorted(found.items())}
+
+    def retire_artifacts(
+        self,
+        keys: tuple[tuple[str, str, str, str], ...],
+        retirement_id: str,
+    ) -> None:
+        """Atomically retire verified catalog artifact pairs by exact keys.
+
+        Record the retirement ID and original hashes for audit. Reject any
+        key whose hash or research-run reference changed since planning.
+        """
+        clean = retirement_id.strip()
+        if not clean or "/" in clean or clean in {".", ".."} or ".." in clean:
+            raise ValueError("retirement id must be non-empty")
+        normalized: list[tuple[str, str, str, str]] = []
+        for key in keys:
+            if len(key) != 4 or any(not part for part in key):
+                raise ValueError("retirement key must name source, endpoint, request, and snapshot")
+            normalized.append((key[0], key[1], key[2], key[3]))
+        if not normalized:
+            return
+        retired_at = datetime.now().astimezone().isoformat()
+        with self.transaction():
+            for source, endpoint, request_key, snapshot_id in normalized:
+                row = self._conn.execute(
+                    "SELECT sha256, local_path, byte_length FROM raw_artifact WHERE source=? AND endpoint=? AND request_key=? AND snapshot_id=?",
+                    (source, endpoint, request_key, snapshot_id),
+                ).fetchone()
+                if row is None:
+                    audit = self._conn.execute(
+                        "SELECT sha256 FROM retirement_entry WHERE retirement_id=? AND source=? AND endpoint=? AND request_key=? AND snapshot_id=?",
+                        (clean, source, endpoint, request_key, snapshot_id),
+                    ).fetchone()
+                    if audit is None:
+                        raise ValueError(f"unknown retirement key: {request_key!r}")
+                    continue
+                digest = str(row["sha256"])
+                if self.references_to_hashes(frozenset({digest})):
+                    raise ValueError(f"retirement blocked by research run reference: {request_key!r}")
+                target = self._resolve_inside(PurePosixPath(str(row["local_path"])))
+                if target.is_file():
+                    if _sha256_file(target) != digest.lower():
+                        raise ValueError(f"retirement blocked by hash drift: {request_key!r}")
+                    target.unlink()
+                self._conn.execute(
+                    "INSERT INTO retirement_entry (retirement_id, source, endpoint, request_key, snapshot_id, sha256, byte_length, retired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (clean, source, endpoint, request_key, snapshot_id, digest.lower(), int(row["byte_length"]), retired_at),
+                )
+                self._conn.execute(
+                    "DELETE FROM raw_artifact WHERE source=? AND endpoint=? AND request_key=? AND snapshot_id=?",
+                    (source, endpoint, request_key, snapshot_id),
+                )

@@ -10,11 +10,14 @@ from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
 import httpx
+import polars as pl
 import pytest
 
 from src.data.catalog import Catalog
+from src.data.imports import ImportManifest, ImportPart
 from src.data.index_store import IndexStore, merge_index_manifest
-from src.data.krx_ingest import collect_index_range
+from src.data.krx_ingest import collect_index_sessions
+from src.data.local_lake import PANEL_DATASET_ID, LocalLake
 from src.integrations.krx_index import KrxIndexClient, KrxSourceError, parse_index_day
 
 KST = ZoneInfo("Asia/Seoul")
@@ -103,11 +106,15 @@ def test_fetch_day_boundaries() -> None:
     def _ok(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen["params"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("AUTH_KEY")
         return httpx.Response(200, json={"OutBlock_1": [_row("코스피", "2767.62", "2784.06")]})
 
     raw = _mock_client(_ok).fetch_day("KOSPI", SESSION)
     assert json.loads(raw.decode("utf-8"))["OutBlock_1"][0]["IDX_NM"] == "코스피"
     assert seen["params"]["basDd"] == "20240627"  # type: ignore[index]
+    assert "serviceKey" not in seen["params"]  # type: ignore[operator]
+    assert seen["auth"] == API_KEY
+    assert str(seen["url"]).startswith("https://data-dbg.krx.co.kr/svc/apis/idx/")
     assert "kospi_dd_trd" in str(seen["url"])
     assert _mock_client(_ok).fetch_day("KOSDAQ", SESSION) is not None
 
@@ -221,24 +228,45 @@ def test_credential_exclusion_from_cache_and_errors() -> None:
 def test_project_local_replay_without_api_access(tmp_path: Path) -> None:
     """Cached raw responses replay the same bar and hash with no live lookup."""
     catalog = Catalog(tmp_path / "data" / "catalog.sqlite")
-    probe = (PROBE / "kospi_20240627.json").read_bytes()
+    kospi_probe = (PROBE / "kospi_20240627.json").read_bytes()
+    kosdaq_probe = (PROBE / "kosdaq_20240627.json").read_bytes()
 
     class _Client:
         def fetch_day(self, market: str, session: date) -> bytes:
-            assert (market, session) == ("KOSPI", SESSION)
-            return probe
+            assert session == SESSION
+            return {"KOSPI": kospi_probe, "KOSDAQ": kosdaq_probe}[market]
 
-    summary = collect_index_range(
+    lake_root = tmp_path / "data"
+    panel_path = lake_root / "imports" / PANEL_DATASET_ID / "year=2024/part.parquet"
+    panel_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"session": [SESSION]}).write_parquet(panel_path)
+    with panel_path.open("rb") as handle:
+        panel_digest = hashlib.sha256(handle.read()).hexdigest()
+    lake = LocalLake(
+        lake_root,
+        {
+            PANEL_DATASET_ID: ImportManifest(
+                PANEL_DATASET_ID,
+                "0" * 64,
+                datetime.now(tz=ZoneInfo("UTC")),
+                (ImportPart(PurePosixPath("year=2024/part.parquet"), panel_digest, panel_path.stat().st_size),),
+            )
+        },
+    )
+    summary = collect_index_sessions(
         _Client(),  # type: ignore[arg-type]
         catalog,
-        "KOSPI",
+        lake,
+        None,
         SESSION,
         SESSION,
         tmp_path / "data",
         "snap-1",
     )
-    assert summary.bars_registered == 1
-    expected_hash = _digest(probe)
+    assert summary.expected_keys == 2
+    assert summary.fetched_keys == 2
+    assert summary.unresolved_keys == ()
+    expected_hash = _digest(kospi_probe)
     artifact = catalog.find_artifact("krx", "index", "KOSPI:20240627", "snap-1")
     assert artifact is not None
     assert artifact.sha256 == expected_hash

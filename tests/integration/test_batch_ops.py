@@ -20,7 +20,6 @@ from src.data.imports import ImportManifest, ImportPart
 from src.data.index_store import load_index_manifest, merge_index_manifest
 from src.data.local_lake import PANEL_DATASET_ID, UNIVERSE_DATASET_ID
 from src.integrations.dart import DartSourceError
-from src.integrations.krx_index import KrxSourceError
 
 KST = ZoneInfo("Asia/Seoul")
 SESSIONS = [date(2024, 5, 30) + timedelta(days=offset) for offset in range(30)]
@@ -236,9 +235,22 @@ class _FailingDartClient:
         raise AssertionError("no candidates expected")
 
 
-class _FailingKrxClient:
+class _ServingKrxClient:
     def fetch_day(self, market: str, session: date) -> bytes:  # type: ignore[no-untyped-def]
-        raise KrxSourceError("NO_DATA", False, "unavailable")
+        headline = {"KOSPI": "코스피", "KOSDAQ": "코스닥"}[market]
+        return json.dumps(
+            {
+                "OutBlock_1": [
+                    {
+                        "BAS_DD": session.strftime("%Y%m%d"),
+                        "IDX_CLSS": market,
+                        "IDX_NM": headline,
+                        "OPNPRC_IDX": "2700.00",
+                        "CLSPRC_IDX": "2710.00",
+                    }
+                ]
+            }
+        ).encode("utf-8")
 
 
 class _BrokenModel:
@@ -252,11 +264,11 @@ def test_interrupted_page_resumes_without_partial_memo(tmp_path: Path) -> None:
     _seed_base(data_root)
     as_of = datetime(2024, 6, 29, 18, 0, tzinfo=KST)
     dart = _FailingDartClient()
-    first = run_daily_batch(_policy(), data_root, as_of, dart_client=dart, krx_client=_FailingKrxClient())
+    first = run_daily_batch(_policy(), data_root, as_of, dart_client=dart, krx_client=_ServingKrxClient())
     assert first.memos_published == 0
     assert any("DART_WINDOW_INCOMPLETE" in failure for failure in first.failures)
     assert not list(data_root.rglob("*.partial"))
-    second = run_daily_batch(_policy(), data_root, as_of, dart_client=dart, krx_client=_FailingKrxClient())
+    second = run_daily_batch(_policy(), data_root, as_of, dart_client=dart, krx_client=_ServingKrxClient())
     assert second.run_id != first.run_id
     assert second.memos_published >= 1
     assert not list(data_root.rglob("*.partial"))

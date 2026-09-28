@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import calendar
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -13,6 +16,7 @@ from src.core.time_policy import knowledge_available_at
 from src.data.catalog import Catalog, FilingVersion
 from src.data.event_store import EventStore
 from src.data.local_lake import LocalLake, SecurityMatch
+from src.data.local_paths import checked_local_path
 from src.integrations.dart import DartClient, DartSourceError
 
 _EXACT_FORM = "주요사항보고서(자기주식취득결정)"
@@ -70,14 +74,138 @@ def _window_key(start: date, end: date) -> str:
     return f"{start.isoformat()}:{end.isoformat()}"
 
 
-def _resume_page(cursor: str | None) -> int:
+_HISTORY_MIN_START = date(2023, 1, 1)
+_COMPLETE_JOB = "dart-backfill-complete"
+_MAX_REQUEST_DAYS = 93
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalBackfillSummary:
+    """Account for complete DART windows and project-owned source evidence."""
+
+    windows_complete: int
+    list_pages_reused: int
+    list_pages_fetched: int
+    documents_reused: int
+    documents_fetched: int
+    events_accepted: int
+
+
+def _next_page_from_cursor(cursor: str | None) -> int:
     if cursor is None or not cursor.startswith("page-"):
         return 1
     try:
-        current = int(cursor[len("page-"):])
+        current = int(cursor[len("page-") :])
     except ValueError:
         return 1
     return current + 1 if current >= 1 else 1
+
+
+def _month_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Split an inclusive date range into calendar-month slices with no gaps or overlap."""
+    windows: list[tuple[date, date]] = []
+    cursor = date(start.year, start.month, 1)
+    first = True
+    while True:
+        month_end_day = calendar.monthrange(cursor.year, cursor.month)[1]
+        month_end = date(cursor.year, cursor.month, month_end_day)
+        window_start = start if first else cursor
+        window_end = min(month_end, end)
+        if window_start <= window_end:
+            windows.append((window_start, window_end))
+        first = False
+        if month_end >= end:
+            break
+        cursor = date(cursor.year + 1, 1, 1) if cursor.month == 12 else date(cursor.year, cursor.month + 1, 1)
+    return windows
+
+
+def _parse_completion_cursor(cursor: str) -> tuple[int, tuple[str, ...]] | None:
+    if not cursor.startswith("complete:"):
+        return None
+    body = cursor[len("complete:") :]
+    pages_text, sep, receipts_text = body.partition(":")
+    if not sep:
+        return None
+    try:
+        pages = int(pages_text)
+    except ValueError:
+        return None
+    if pages < 1:
+        return None
+    if not receipts_text:
+        return (pages, ())
+    receipts = tuple(part for part in receipts_text.split(",") if part)
+    return (pages, receipts)
+
+
+def _encode_completion_cursor(pages: int, receipts: tuple[str, ...]) -> str:
+    return f"complete:{pages}:{','.join(receipts)}"
+
+
+def _artifact_file_valid(catalog: Catalog, data_root: Path, relative: PurePosixPath, expected_sha: str) -> bool:
+    try:
+        resolved = checked_local_path(data_root, relative)
+    except (ValueError, OSError):
+        return False
+    if resolved.is_symlink() or not resolved.is_file():
+        return False
+    try:
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return digest == expected_sha.lower()
+
+
+def _is_month_complete_valid(
+    catalog: Catalog, data_root: Path, window_key: str, snapshot_id: str
+) -> tuple[int, tuple[str, ...]] | None:
+    """Return (pages, receipts) when the durable completion marker is still verified."""
+    raw = catalog.load_checkpoint(_COMPLETE_JOB, window_key, snapshot_id)
+    if raw is None:
+        return None
+    parsed = _parse_completion_cursor(raw)
+    if parsed is None:
+        return None
+    pages, receipts = parsed
+    expected_cursor = f"page-{pages}"
+    actual_cursor = catalog.load_checkpoint(_JOB, window_key, snapshot_id)
+    if actual_cursor != expected_cursor:
+        return None
+    for page_no in range(1, pages + 1):
+        artifact = catalog.find_artifact("dart", "list", f"{window_key}:page-{page_no}", snapshot_id)
+        if artifact is None:
+            return None
+        if not _artifact_file_valid(catalog, data_root, artifact.local_relative_path, artifact.sha256):
+            return None
+    for rcept_no in receipts:
+        artifact = catalog.find_artifact("dart", "document", rcept_no, snapshot_id)
+        if artifact is None:
+            return None
+        if not _artifact_file_valid(catalog, data_root, artifact.local_relative_path, artifact.sha256):
+            return None
+    return (pages, receipts)
+
+
+def _resume_page(
+    catalog: Catalog,
+    request_key: str,
+    snapshot_id: str,
+) -> int | None:
+    """Return the next unfinished page, or None for a completed window.
+
+    A durable completion marker is distinct from a page checkpoint. Its
+    validity depends on the verified terminal page and all selected ZIPs.
+    """
+    data_root = catalog.db_path.parent
+    if _is_month_complete_valid(catalog, data_root, request_key, snapshot_id) is not None:
+        return None
+    cursor = catalog.load_checkpoint(_JOB, request_key, snapshot_id)
+    if cursor is None:
+        return 1
+    if cursor.startswith("complete:"):
+        return 1
+    return _next_page_from_cursor(cursor)
 
 
 def build_filing_version(
@@ -113,7 +241,9 @@ def build_filing_version(
 __all__ = [
     "CollectionSummary",
     "DartListRow",
+    "HistoricalBackfillSummary",
     "build_filing_version",
+    "collect_buyback_history",
     "collect_buyback_window",
     "resolve_listed_security",
 ]
@@ -156,7 +286,7 @@ def collect_buyback_window(
     data_root.mkdir(parents=True, exist_ok=True)
     window = _window_key(start, end)
     cursor = catalog.load_checkpoint(_JOB, window, snapshot_id)
-    page_no = _resume_page(cursor)
+    page_no = _next_page_from_cursor(cursor)
     pages = 0
     candidates = 0
     listed = 0
@@ -263,4 +393,189 @@ def collect_buyback_window(
         documents_registered=documents,
         failed_receipts=failed,
         checkpoint_cursor=last_cursor,
+    )
+
+
+class _HistoryTrackingClient:
+    """Observe listed pages and document requests without changing provider contracts."""
+
+    def __init__(self, inner: DartClient) -> None:
+        self._inner = inner
+        self.doc_requests: list[str] = []
+
+    def list_major_reports(self, start: date, end: date, page: int) -> object:
+        return self._inner.list_major_reports(start, end, page)
+
+    def document_zip(self, rcept_no: str) -> bytes:
+        self.doc_requests.append(rcept_no)
+        return self._inner.document_zip(rcept_no)
+
+    def current_buyback_details(self, corp_code: str, start: date, end: date) -> bytes:
+        return self._inner.current_buyback_details(corp_code, start, end)
+
+
+def _listed_receipts_from_saved_pages(
+    catalog: Catalog, data_root: Path, window_key: str, snapshot_id: str, pages: int
+) -> tuple[str, ...]:
+    """Verify every durable list page and recover the complete selected receipt set."""
+    receipts: set[str] = set()
+    for page_no in range(1, pages + 1):
+        artifact = catalog.find_artifact("dart", "list", f"{window_key}:page-{page_no}", snapshot_id)
+        if artifact is None or not _artifact_file_valid(
+            catalog, data_root, artifact.local_relative_path, artifact.sha256
+        ):
+            raise ValueError(f"incomplete source evidence for window {window_key}")
+        relative = checked_local_path(data_root, artifact.local_relative_path)
+        try:
+            document = json.loads(relative.read_bytes().decode("utf-8"))
+            if document.get("status") == "010" and pages == 1:
+                continue
+            if document.get("status") != "000" or int(document["page_no"]) != page_no:
+                raise ValueError("list page identity mismatch")
+            rows = document["list"]
+            if not isinstance(rows, list):
+                raise ValueError("invalid list rows")
+            for row in rows:
+                if _is_buyback_candidate(str(row["report_nm"])) and _is_listed_candidate(
+                    str(row["corp_cls"]), str(row["stock_code"])
+                ):
+                    receipts.add(str(row["rcept_no"]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"invalid retained DART list for window {window_key}") from exc
+    return tuple(sorted(receipts))
+
+
+def _count_filings(catalog: Catalog, receipts: tuple[str, ...]) -> int:
+    far_future = datetime.max.replace(tzinfo=UTC)
+    total = 0
+    for rcept_no in receipts:
+        try:
+            filing = catalog.get_filing_asof(rcept_no, far_future)
+        except (ValueError, OSError):
+            continue
+        if filing is not None:
+            total += 1
+    return total
+
+
+def collect_buyback_history(
+    client: DartClient,
+    catalog: Catalog,
+    lake: LocalLake,
+    start: date,
+    end: date,
+    data_root: Path,
+    snapshot_id: str,
+    document_limits: DocumentLimits | None = None,
+    event_store: EventStore | None = None,
+) -> HistoricalBackfillSummary:
+    """Collect a resumable official history of buyback disclosures.
+
+    Bound each list request to one calendar month, preserve original list
+    responses and receipt ZIPs, and finish a window only after every page
+    and selected document is verified. Use HISTORICAL_BACKFILL semantics
+    and preserve correction lineage. Raise on incomplete source evidence.
+    """
+    if start > end:
+        raise ValueError("collection window must not be empty")
+    if start < _HISTORY_MIN_START:
+        raise ValueError("historical backfill starts at 2023-01-01 or later")
+    if not snapshot_id or "/" in snapshot_id or snapshot_id in {".", ".."} or ".." in snapshot_id:
+        raise ValueError("snapshot id must be non-empty")
+    data_root.mkdir(parents=True, exist_ok=True)
+    months = _month_windows(start, end)
+    if not months:
+        raise ValueError("collection window must not be empty")
+    for window_start, window_end in months:
+        if (window_end - window_start).days > _MAX_REQUEST_DAYS:
+            raise ValueError("individual request window exceeds the three-month API limit")
+        # Calendar-month slices are at most 31 days, satisfying the provider
+        # three-month bound from https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019001.
+
+    windows_complete = 0
+    list_pages_reused = 0
+    list_pages_fetched = 0
+    documents_reused = 0
+    documents_fetched = 0
+    filings_accepted = 0
+
+    for window_start, window_end in months:
+        window_key = _window_key(window_start, window_end)
+        completion = catalog.load_checkpoint(_COMPLETE_JOB, window_key, snapshot_id)
+        verified = _is_month_complete_valid(catalog, data_root, window_key, snapshot_id)
+        if verified is not None:
+            pages, receipts = verified
+            windows_complete += 1
+            list_pages_reused += pages
+            documents_reused += len(receipts)
+            filings_accepted += _count_filings(catalog, receipts)
+            continue
+        if completion is not None:
+            raise ValueError(f"invalid completed DART window {window_key}")
+        cursor = catalog.load_checkpoint(_JOB, window_key, snapshot_id)
+        if cursor is not None and cursor.startswith("page-"):
+            try:
+                previous_page = int(cursor[len("page-") :])
+            except ValueError as exc:
+                raise ValueError(f"invalid DART checkpoint for window {window_key}") from exc
+            if previous_page < 1:
+                raise ValueError(f"invalid DART checkpoint for window {window_key}")
+            catalog.save_checkpoint(_JOB, window_key, snapshot_id, f"page-{previous_page - 1}")
+        tracker = _HistoryTrackingClient(client)
+        summary = collect_buyback_window(
+            tracker,  # type: ignore[arg-type]
+            catalog,
+            lake,
+            window_start,
+            window_end,
+            data_root,
+            snapshot_id,
+            "HISTORICAL_BACKFILL",
+            document_limits,
+            event_store,
+        )
+        if summary.failed_receipts:
+            raise ValueError(f"incomplete source evidence for window {window_key}")
+        cursor = catalog.load_checkpoint(_JOB, window_key, snapshot_id)
+        if cursor is None or not cursor.startswith("page-"):
+            raise ValueError(f"incomplete source evidence for window {window_key}")
+        pages = int(cursor[len("page-") :])
+        receipts = _listed_receipts_from_saved_pages(catalog, data_root, window_key, snapshot_id, pages)
+        # Verify every selected ZIP is durably registered before marking complete.
+        for rcept_no in receipts:
+            artifact = catalog.find_artifact("dart", "document", rcept_no, snapshot_id)
+            if artifact is None:
+                raise ValueError(f"incomplete source evidence for window {window_key}")
+            if not _artifact_file_valid(catalog, data_root, artifact.local_relative_path, artifact.sha256):
+                raise ValueError(f"incomplete source evidence for window {window_key}")
+        catalog.save_checkpoint(
+            _COMPLETE_JOB, window_key, snapshot_id, _encode_completion_cursor(pages, receipts)
+        )
+        windows_complete += 1
+        list_pages_reused += max(0, pages - summary.pages)
+        list_pages_fetched += summary.pages
+        documents_fetched += len(set(tracker.doc_requests))
+        documents_reused += max(0, len(receipts) - len(set(tracker.doc_requests)))
+        filings_accepted += summary.documents_registered
+
+    if event_store is not None:
+        try:
+            far_future = datetime.max.replace(tzinfo=UTC)
+            events_accepted = len(event_store.list_prior_events(far_future))
+            # list_prior_events only returns LINKED events with eligible filings;
+            # fall back to filing counts when parsing was disabled.
+            if document_limits is None and events_accepted == 0:
+                events_accepted = filings_accepted
+        except (ValueError, OSError):
+            events_accepted = filings_accepted
+    else:
+        events_accepted = filings_accepted
+
+    return HistoricalBackfillSummary(
+        windows_complete=windows_complete,
+        list_pages_reused=list_pages_reused,
+        list_pages_fetched=list_pages_fetched,
+        documents_reused=documents_reused,
+        documents_fetched=documents_fetched,
+        events_accepted=events_accepted,
     )

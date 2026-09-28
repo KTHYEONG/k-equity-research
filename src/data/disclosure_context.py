@@ -361,12 +361,16 @@ def collect_event_disclosure_context(
                 for rcept_no in known:
                     if rcept_no not in doc_ok:
                         missing.add(rcept_no)
+                if missing:
+                    raise ValueError(f"incomplete DART documents for issuer window {window}")
                 continue
             done_pages, terminal = 0, False
 
         # Fresh or resumed walk of this issuer-window chunk.
         known = _known_receipts(catalog, corp_code, chunk_start, chunk_end, snapshot_id)
-        page_no = done_pages + 1 if done_pages >= 1 else 1
+        # Revisit the last verified page: it may have been terminal while a
+        # document fetch failed, so requesting page N+1 would skip the gap.
+        page_no = done_pages if done_pages >= 1 else 1
         # Verify previously checkpointed pages before resuming.
         restart = False
         for existing_no in range(1, done_pages + 1):
@@ -379,9 +383,9 @@ def collect_event_disclosure_context(
         complete = False
         while True:
             try:
-                page = client.list_major_reports(chunk_start, chunk_end, page_no)
-            except DartSourceError:
-                break
+                page = client.list_reports(chunk_start, chunk_end, page_no, corp_code=corp_code)
+            except DartSourceError as exc:
+                raise ValueError(f"incomplete DART list for issuer window {window}, page {page_no}: {exc.status}") from exc
             observed_at = datetime.now(UTC)
             issuer_rows = [row for row in page.rows if str(row.corp_code) == corp_code]
             zips: list[bytes] = []
@@ -480,6 +484,13 @@ def collect_event_disclosure_context(
                 break
             page_no += 1
         if complete:
+            known = _known_receipts(catalog, corp_code, chunk_start, chunk_end, snapshot_id)
+            if any(
+                info.get("document_ok") != 1
+                or not _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no)
+                for rcept_no, info in known.items()
+            ):
+                raise ValueError(f"incomplete DART documents for issuer window {window}")
             # Reconcile the exact verified page count from durable artifacts.
             total_pages = 0
             probe = 1
@@ -501,8 +512,8 @@ def collect_event_disclosure_context(
                     )
         for rcept_no, info in known.items():
             discovered.add(rcept_no)
-            if _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no) and int(
-                info.get("document_ok", 0)  # type: ignore[arg-type]
+            if _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no) and (
+                info.get("document_ok") == 1
             ):
                 doc_ok.add(rcept_no)
             else:

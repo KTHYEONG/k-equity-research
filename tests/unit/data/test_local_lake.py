@@ -344,3 +344,25 @@ def test_universe_projects_bounded_window(tmp_path: Path) -> None:
         lake.market_universe(WED, MON, as_of)
     with pytest.raises(ValueError, match="timezone"):
         lake.market_universe(MON, WED, datetime(2024, 6, 26, 9, 0))
+
+
+def _sessions_lake(data_root: Path, sessions: list[date]) -> LocalLake:
+    manifest = _register(
+        data_root, PANEL_DATASET_ID, {"year=2024/part.parquet": pl.DataFrame({"session": sessions})}
+    )
+    return LocalLake(data_root, {PANEL_DATASET_ID: manifest})
+
+
+def test_sessions_between_skips_holidays_and_weekends(tmp_path: Path) -> None:
+    """A weekday market holiday and weekend days never appear in the retained calendar."""
+    lake = _sessions_lake(tmp_path / "data", [MON, TUE, THU, FRI])
+    assert lake.sessions_between(MON, FRI) == (MON, TUE, THU, FRI)
+    assert lake.sessions_between(WED, WED) == ()
+    assert lake.sessions_between(date(2024, 6, 29), date(2024, 6, 30)) == ()
+
+
+def test_sessions_between_rejects_inverted_bounds(tmp_path: Path) -> None:
+    """An inverted interval fails before any session is returned."""
+    lake = _sessions_lake(tmp_path / "data", [MON, TUE])
+    with pytest.raises(ValueError, match="empty"):
+        lake.sessions_between(TUE, MON)

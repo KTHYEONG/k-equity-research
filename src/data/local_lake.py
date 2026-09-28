@@ -16,9 +16,9 @@ import polars as pl
 from src.data.imports import ImportManifest
 from src.data.local_paths import checked_local_path
 
-PANEL_DATASET_ID = "market_panel_f0f4f40a51b28a94"
-UNIVERSE_DATASET_ID = "ordinary_universe_3342e1b309c8dd8a"
-FACTS_DATASET_ID = "financial_facts_96b4fdce34daaf72"
+PANEL_DATASET_ID = "market_panel_from_20220707_v1"
+UNIVERSE_DATASET_ID = "ordinary_universe_from_20220707_v1"
+FACTS_DATASET_ID = "financial_facts_from_20220101_v1"
 SecurityStatus = Literal["OK", "AMBIGUOUS", "MISSING", "MISSING_LOCAL"]
 
 ORDINARY_SHARE_KIND = "보통주"
@@ -220,6 +220,16 @@ class LocalLake:
         if index >= len(self._sessions):
             return None
         return self._sessions[index]
+
+    def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        """Return verified retained exchange sessions within inclusive dates.
+
+        The session calendar comes from the active local market dataset, not
+        weekdays or an external project. Raise if the active import is invalid.
+        """
+        if start > end:
+            raise ValueError("session window must not be empty")
+        return tuple(session for session in self._sessions if start <= session <= end)
 
     def _universe_rows(self, session: date, ticker: str, as_of: datetime) -> list[dict[str, Any]]:
         files = [

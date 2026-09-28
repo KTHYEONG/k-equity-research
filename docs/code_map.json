@@ -5,5 +5,9 @@
   "src/eval/replay.py": {
     "architecture": "docs/project-development-plan.md",
     "testing": "tests/unit/eval/test_replay.py"
+  },
+  "src/data/retention_cleanup.py": {
+    "architecture": "docs/data-readiness.md",
+    "testing": "tests/unit/data/test_retention_cleanup.py"
   }
 }

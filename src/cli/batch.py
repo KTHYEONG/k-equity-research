@@ -372,37 +372,30 @@ def run_daily_batch(
                     failures.append(f"DART_WINDOW_INCOMPLETE:{wstart.isoformat()}:{wend.isoformat()}")
                     break
 
-    # Stage 2: KRX daily collection, merged into a new cumulative manifest.
+    # Stage 2: session-bounded KRX collection, merged into a new cumulative manifest.
     previous = _load_previous_manifest(data_root)
     resolved_krx = krx_client if krx_client is not None else _try_krx_client()
-    accepted: list[tuple[str, date, str]] = []
-    if resolved_krx is not None and krx_end >= krx_start:
-        from src.data.krx_ingest import collect_index_range
+    krx_manifests = _read_import_manifests(data_root)
+    try:
+        krx_lake = LocalLake(data_root, krx_manifests)
+    except ValueError as exc:
+        failures.append(f"KRX_WINDOW_FAILED:{exc}")
+        index_manifest = merge_index_manifest(previous, [], data_root)
+    else:
+        if resolved_krx is not None and krx_end >= krx_start:
+            from src.data.krx_ingest import collect_index_sessions
 
-        for market in ("KOSPI", "KOSDAQ"):
             try:
-                krx_summary = collect_index_range(
-                    resolved_krx, catalog, market, krx_start, krx_end, data_root, snapshot_id
+                krx_summary = collect_index_sessions(
+                    resolved_krx, catalog, krx_lake, previous, krx_start, krx_end, data_root, snapshot_id
                 )
             except (ValueError, OSError) as exc:
-                failures.append(f"KRX_WINDOW_FAILED:{market}:{exc}")
-                break
-            if krx_summary.failed_sessions:
-                failures.append(f"KRX_WINDOW_INCOMPLETE:{market}:{krx_summary.checkpoint_cursor}")
-                break
-        session = krx_start
-        while session <= krx_end:
-            for market in ("KOSPI", "KOSDAQ"):
-                found = catalog.find_artifact(
-                    source="krx",
-                    endpoint="index",
-                    request_key=f"{market}:{session:%Y%m%d}",
-                    snapshot_id=snapshot_id,
-                )
-                if found is not None:
-                    accepted.append((market, session, found.sha256))
-            session += timedelta(days=1)
-    index_manifest = merge_index_manifest(previous, accepted, data_root)
+                failures.append(f"KRX_WINDOW_FAILED:{exc}")
+                index_manifest = merge_index_manifest(previous, [], data_root)
+            else:
+                index_manifest = krx_summary.manifest
+        else:
+            index_manifest = merge_index_manifest(previous, [], data_root)
 
     # Stages 3-6: verified parse/link (durable in catalog/event store) -> PIT analysis ->
     # baseline/optional AI -> validation -> atomic publication.

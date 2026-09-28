@@ -13,7 +13,7 @@ import httpx
 
 Market = Literal["KOSPI", "KOSDAQ"]
 
-_BASE_URL = "https://data.krx.co.kr"
+_BASE_URL = "https://data-dbg.krx.co.kr/svc/apis"
 _ENDPOINTS: dict[str, str] = {"KOSPI": "idx/kospi_dd_trd", "KOSDAQ": "idx/kosdaq_dd_trd"}
 _HEADLINE: dict[str, str] = {"KOSPI": "코스피", "KOSDAQ": "코스닥"}
 
@@ -84,12 +84,12 @@ class KrxIndexClient:
         if endpoint is None:
             raise ValueError("market must be KOSPI or KOSDAQ")
         url = f"{_BASE_URL}/{endpoint}"
-        params = {"serviceKey": self._api_key, "basDd": session.strftime("%Y%m%d")}
+        params = {"basDd": session.strftime("%Y%m%d")}
         attempts = 0
         while True:
             attempts += 1
             try:
-                response = self._client.get(url, params=params)
+                response = self._client.get(url, params=params, headers={"AUTH_KEY": self._api_key})
             except httpx.HTTPError:
                 if attempts >= _MAX_ATTEMPTS:
                     raise KrxSourceError("TRANSPORT", True, "krx index transport failure") from None

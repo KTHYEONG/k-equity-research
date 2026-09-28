@@ -17,6 +17,7 @@
 - **Human-Centric Clarity:** Communicate in intuitive, plain language (Problem → Root Cause → Impact) rather than dense, robotic jargon dumps.
 - **Korean by Default:** Always converse, explain, and report in natural Korean (한국어). Inside structured output cards, retain English keys/badges (e.g. `[PROBE]`, `[CHECK]`, `Verdict`, `Status`) while writing descriptions, findings, and rationales in natural Korean.
 - **English for Technical Specifications:** System instructions, rules, specifications (`docs/specs/`), code, and docstrings are written in English for token efficiency and reasoning precision.
+- **Commit Protocol:** Always execute git commits using the `commit` skill.
 
 ## 4. Domain Rule Routing
 - **Event Research & Financial AI:** [research.md](.agents/rules/research.md) — *Disclosure causality, event studies, primary source grounding, KRX market realism, and scale invariance.*

@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 _LIST_URL = "https://opendart.fss.or.kr/api/list.json"
 _DOCUMENT_URL = "https://opendart.fss.or.kr/api/document.xml"
 _DETAIL_URL = "https://opendart.fss.or.kr/api/buybackDetail.json"
+_FINANCIAL_URL = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
+_VALID_REPRT_CODES = frozenset({"11011", "11012", "11013", "11014"})
+_VALID_SJ_DIVS = frozenset({"BS", "IS", "CIS", "CF", "SCE"})
+_FIN_AUTH_STATUSES = frozenset({"010", "011", "012", "100", "101", "102", "110", "111", "112", "901"})
 
 _MAX_ATTEMPTS = 3
 _PAGE_SIZE = 100
@@ -50,6 +54,31 @@ class DartListPage:
     total_count: int
     raw_bytes: bytes
     rows: tuple[DartListRow, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FinancialStatementRequest:
+    """Identify one official OpenDART financial statement snapshot."""
+
+    corp_code: str
+    bsns_year: int
+    reprt_code: str
+    fs_div: Literal["CFS", "OFS"]
+
+
+def _check_financial_request(request: FinancialStatementRequest) -> tuple[str, str, str, str]:
+    corp = request.corp_code.strip()
+    if len(corp) != 8 or not corp.isdigit():
+        raise ValueError("corp code must be an 8-digit string")
+    if request.bsns_year < 2015 or request.bsns_year > 2100:
+        raise ValueError("business year must be between 2015 and 2100")
+    reprt = request.reprt_code.strip()
+    if reprt not in _VALID_REPRT_CODES:
+        raise ValueError("report code must be one of 11011, 11012, 11013, 11014")
+    basis = str(request.fs_div).strip()
+    if basis not in {"CFS", "OFS"}:
+        raise ValueError("fs division must be CFS or OFS")
+    return corp, f"{request.bsns_year:04d}", reprt, basis
 
 
 def _safe_message(message: str) -> str:
@@ -109,20 +138,37 @@ class DartClient:
         return "DartClient(<redacted>)"
 
     def list_major_reports(self, start: date, end: date, page: int) -> DartListPage:
-        """Fetch one OpenDART B-report page with last_reprt_at=N and 100 rows per page. Preserve response bytes and page metadata; raise a typed source error on API status or schema failure without treating an incomplete page as success."""
+        """Fetch an unfiltered OpenDART page for the existing buyback collector.
+
+        The legacy method name is retained for callers, but a type filter
+        would omit E-category buyback disclosures. Preserve every submitted
+        version and let the collector apply its exact title filter.
+        """
+        return self.list_reports(start, end, page)
+
+    def list_reports(self, start: date, end: date, page: int, corp_code: str | None = None) -> DartListPage:
+        """Fetch one all-category list page, optionally limited to one issuer.
+
+        Keep corrections with last_reprt_at=N and preserve original response
+        bytes. Reject malformed issuer identities and provider responses so
+        an incomplete source page cannot be treated as empty coverage.
+        """
         if page < 1:
             raise ValueError("page must be >= 1")
         if start > end:
             raise ValueError("collection window must not be empty")
+        if corp_code is not None and (len(corp_code) != 8 or not corp_code.isdigit()):
+            raise ValueError("corp code must be an 8-digit string")
         params = {
             "crtfc_key": self._api_key,
             "bgn_de": start.strftime("%Y%m%d"),
             "end_de": end.strftime("%Y%m%d"),
             "last_reprt_at": "N",
-            "pblntf_ty": "B",
             "page_no": str(page),
             "page_count": str(_PAGE_SIZE),
         }
+        if corp_code is not None:
+            params["corp_code"] = corp_code
         attempts = 0
         while True:
             attempts += 1
@@ -159,7 +205,7 @@ class DartClient:
                 raise DartSourceError(status, True, message or "dart request failure")
             try:
                 page_no = _coerce_int(payload.get("page_no"), "page_no")
-                page_count = _coerce_int(payload.get("page_count"), "page_count")
+                page_count = _coerce_int(payload.get("total_page"), "total_page")
                 total_count = _coerce_int(payload.get("total_count"), "total_count")
                 items = payload.get("list")
                 if not isinstance(items, list):
@@ -169,6 +215,8 @@ class DartClient:
                 if len(items) > _PAGE_SIZE:
                     raise ValueError("page size")
                 rows = tuple(_build_row(item) for item in items)
+                if corp_code is not None and any(row.corp_code != corp_code for row in rows):
+                    raise ValueError("corp_code")
             except ValueError:
                 raise DartSourceError("SCHEMA", False, "dart list schema failure") from None
             return DartListPage(
@@ -231,10 +279,64 @@ class DartClient:
                 raise DartSourceError("TRANSPORT", False, "dart detail transport failure")
             return bytes(response.content)
 
+    def fetch_financial_statement(self, request: FinancialStatementRequest) -> bytes:
+        """Return the unmodified official financial statement response bytes.
+
+        Use the client's existing credential, timeout, retry, and redacted
+        logging conventions. Surface provider status and transport failures;
+        do not interpret no-data or quota responses as an empty statement.
+        """
+        corp, year, reprt, basis = _check_financial_request(request)
+        params = {
+            "crtfc_key": self._api_key,
+            "corp_code": corp,
+            "bsns_year": year,
+            "reprt_code": reprt,
+            "fs_div": basis,
+        }
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                response = self._client.get(_FINANCIAL_URL, params=params)
+            except httpx.HTTPError:
+                if attempts >= _MAX_ATTEMPTS:
+                    raise DartSourceError("TRANSPORT", True, "dart financial transport failure") from None
+                continue
+            if response.status_code in _RETRYABLE_HTTP:
+                if attempts >= _MAX_ATTEMPTS:
+                    raise DartSourceError("TRANSPORT", True, "dart financial transport failure")
+                continue
+            if response.status_code != 200:
+                raise DartSourceError("TRANSPORT", False, "dart financial transport failure")
+            raw = bytes(response.content)
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise DartSourceError("SCHEMA", False, "dart financial schema failure") from None
+            if not isinstance(payload, dict):
+                raise DartSourceError("SCHEMA", False, "dart financial schema failure")
+            status = str(payload.get("status", "")).strip()
+            message = _safe_message(str(payload.get("message", "")))
+            if status == "000":
+                return raw
+            if status == "013":
+                raise DartSourceError(status, False, message or "dart financial no data")
+            if status == "020":
+                if attempts >= _MAX_ATTEMPTS:
+                    raise DartSourceError(status, True, message or "dart quota exceeded")
+                continue
+            if status in _FIN_AUTH_STATUSES:
+                raise DartSourceError(status, False, message or "dart authorization failure")
+            if not status:
+                raise DartSourceError("SCHEMA", False, "dart financial schema failure")
+            raise DartSourceError(status, True, message or "dart request failure")
+
 
 __all__ = [
     "DartClient",
     "DartListPage",
     "DartListRow",
     "DartSourceError",
+    "FinancialStatementRequest",
 ]

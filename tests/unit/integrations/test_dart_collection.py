@@ -93,6 +93,89 @@ def _zip_bytes(tag: bytes) -> bytes:
     return b"PK\x03\x04" + tag
 
 
+def test_all_category_list_uses_issuer_filter_without_disclosure_type() -> None:
+    """An issuer query must retain regular and buyback reports in one response."""
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "status": "000",
+                "message": "정상",
+                "page_no": 1,
+                "total_page": 1,
+                "total_count": 2,
+                "list": [
+                    {
+                        "rcept_no": "20240627000001",
+                        "corp_code": "00123456",
+                        "stock_code": "005930",
+                        "corp_cls": "Y",
+                        "report_nm": "사업보고서",
+                        "rcept_dt": "20240627",
+                        "rm": "",
+                    },
+                    {
+                        "rcept_no": "20240627000002",
+                        "corp_code": "00123456",
+                        "stock_code": "005930",
+                        "corp_cls": "Y",
+                        "report_nm": FORM,
+                        "rcept_dt": "20240627",
+                        "rm": "",
+                    },
+                ],
+            },
+        )
+
+    client = DartClient(API_KEY, httpx.Client(transport=httpx.MockTransport(_handler)))
+    page = client.list_reports(date(2024, 6, 27), date(2024, 6, 28), 1, corp_code="00123456")
+    assert {row.report_name for row in page.rows} == {"사업보고서", FORM}
+    assert requests[0].url.path == "/api/list.json"
+    assert requests[0].url.params["corp_code"] == "00123456"
+    assert requests[0].url.params["last_reprt_at"] == "N"
+    assert "pblntf_ty" not in requests[0].url.params
+
+    buyback_page = client.list_major_reports(date(2024, 6, 27), date(2024, 6, 28), 1)
+    assert len(buyback_page.rows) == 2
+    assert "corp_code" not in requests[1].url.params
+    assert "pblntf_ty" not in requests[1].url.params
+
+
+def test_issuer_list_rejects_provider_identity_mismatch() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "status": "000",
+                "page_no": 1,
+                "total_page": 1,
+                "total_count": 1,
+                "list": [
+                    {
+                        "rcept_no": "20240627000001",
+                        "corp_code": "99999999",
+                        "stock_code": "005930",
+                        "corp_cls": "Y",
+                        "report_nm": "사업보고서",
+                        "rcept_dt": "20240627",
+                        "rm": "",
+                    }
+                ],
+            },
+        )
+
+    client = DartClient(API_KEY, httpx.Client(transport=httpx.MockTransport(_handler)))
+    with pytest.raises(DartSourceError) as error:
+        client.list_reports(date(2024, 6, 27), date(2024, 6, 28), 1, corp_code="00123456")
+    assert error.value.status == "SCHEMA"
+    with pytest.raises(ValueError, match="8-digit"):
+        client.list_reports(date(2024, 6, 27), date(2024, 6, 28), 1, corp_code="short")
+
+
 def test_all_pages_retained(tmp_path: Path) -> None:
     """Both page payloads and both receipt ZIPs are locally registered."""
     catalog, root = _catalog(tmp_path)
@@ -278,6 +361,7 @@ def test_credential_isolation(tmp_path: Path) -> None:
             "message": "정상",
             "page_no": 1,
             "page_count": 1,
+            "total_page": 1,
             "total_count": 1,
             "list": [
                 {
@@ -415,7 +499,8 @@ def test_dart_client_boundaries() -> None:
                 "status": "000",
                 "message": "ok",
                 "page_no": 1,
-                "page_count": 1,
+                "page_count": 100,
+                "total_page": 2,
                 "total_count": 0,
                 "list": [],
             },
@@ -423,6 +508,7 @@ def test_dart_client_boundaries() -> None:
 
     page = _mock_client(_flaky).list_major_reports(date(2024, 5, 30), date(2024, 6, 4), 1)
     assert page.total_count == 0
+    assert page.page_count == 2
 
     def _empty_ok(request: httpx.Request) -> httpx.Response:
         del request
@@ -439,7 +525,7 @@ def test_dart_client_boundaries() -> None:
 
     def _bad_schema(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx.Response(200, json={"status": "000", "page_no": 2, "page_count": 1, "total_count": 0, "list": []})
+        return httpx.Response(200, json={"status": "000", "page_no": 2, "page_count": 1, "total_page": 1, "total_count": 0, "list": []})
 
     with pytest.raises(DartSourceError) as schema_info:
         _mock_client(_bad_schema).list_major_reports(date(2024, 5, 30), date(2024, 6, 4), 1)
@@ -449,7 +535,7 @@ def test_dart_client_boundaries() -> None:
         del request
         return httpx.Response(
             200,
-            json={"status": "000", "page_no": 1, "page_count": 1, "total_count": 1, "list": [{"rcept_no": ""}]},
+            json={"status": "000", "page_no": 1, "page_count": 1, "total_page": 1, "total_count": 1, "list": [{"rcept_no": ""}]},
         )
 
     with pytest.raises(DartSourceError) as row_info:
