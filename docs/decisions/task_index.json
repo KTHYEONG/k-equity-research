@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MEMO_EVIDENCE_INTEGRITY_V1",
+      "date": "2026-09-29",
+      "adr_id": "ADR_20260929_MEMO_EVIDENCE_INTEGRITY_V1",
+      "domain": "research",
+      "title": "메모 아날로그 근거 계보와 검증 복구",
+      "why": "아날로그 통계 인용의 원천 해시 오류와 평가 재현 경로의 증명 검증 누락을 해결한다.",
+      "resolution": "선정 입력과 지수 매니페스트를 결정적 증명에 포함하고, 발행·평가 재현·과거 메모 정정에서 인용 경로와 바이트 해시를 검증한다.",
+      "impact": "기존 2024년 분석 수치를 보존하면서 증거가 확인된 메모만 발행하고 로컬 입력으로 재현할 수 있다.",
+      "caveat": "과거 기록은 덮어쓰지 않고 명시적인 evidence-v2 실행으로 대체하며 증명 입력 파일을 보관해야 한다."
+    },
+    {
       "task_id": "TASK_EQUITY_DATA_RETENTION_V1",
       "date": "2026-09-29",
       "adr_id": "ADR_20260929_EQUITY_DATA_RETENTION_V1",

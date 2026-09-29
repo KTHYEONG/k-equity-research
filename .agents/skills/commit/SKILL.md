@@ -13,6 +13,7 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
    - Inspect `git status --short` and stage ONLY the files verified as part of the current task/spec scope (`git add <file1> <file2> ...`).
    - Do NOT perform blind blanket staging (`git add .` or `git add -A`) when unrelated working tree modifications exist.
    - Do not stage ephemeral artifacts: `scratch/`, `tmp/`, local build/test caches, compiled binaries/bytecode, or logs.
+   - **Specs Are NOT Commit Targets**: Never stage temporary specs or contract files under `docs/specs/` (`*.md`, `*_contract.json`). Specs are transient development artifacts and must be excluded from all commits.
 
 2. **Commit Type Determination**:
    - Determine `<type>` based on the primary nature of the core changes:
@@ -20,7 +21,7 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
      - `fix:`: Bug fixes, defect repairs, or behavioral corrections (`src/` + `tests/`).
      - `refactor:`: Code refactoring, restructuring, or renaming without behavioral changes.
      - `chore:`: Tooling, configs, scripts, rules (`pyproject.toml`, `.agents/`, `tools/`, `.gitignore`).
-     - `docs:`: Standalone documentation changes (`README.md`, specs, guides) with NO production code changes.
+     - `docs:`: Standalone documentation changes (`README.md`, guides, architecture docs) with NO production code changes.
    - **No Artificial `docs:` Splitting**: When a feature or bugfix task updates `task_index.json` and `code_map.json` during `/sync`, commit them together in the same atomic `feat:` or `fix:` commit. Do NOT downgrade or split the commit into an artificial `docs:` commit.
 
 3. **Strict Korean Language Invariant (Subject & Body)**:
