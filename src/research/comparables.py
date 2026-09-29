@@ -18,7 +18,7 @@ _TRADABLE_STATE = "tradable"
 
 @dataclass(frozen=True, slots=True)
 class PastEventProfile:
-    """Frozen verified prior buyback event assembled only from prior research."""
+    """Pre-target filing and market observations used to rank one prior event, with immutable source hashes for audit."""
 
     event_id: str
     receipt_date: date
@@ -28,11 +28,23 @@ class PastEventProfile:
     prior_market_cap: Decimal
     planned_amount_ratio: Decimal | None
     first_safe_intraday_excess: Decimal | None
+    source_hashes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AnalogueObservation:
+    """One observed prior intraday outcome and the filing and market hashes required to reproduce it."""
+
+    event_id: str
+    receipt_date: date
+    outcome_available_at: datetime
+    intraday_excess: Decimal
+    source_hashes: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ComparableSet:
-    """Frozen observable peer and analogue selection for one target event."""
+    """Frozen pre-filing peer and analogue selection, observed outcomes, exclusions, and source lineage."""
 
     event_id: str
     as_of: datetime
@@ -43,6 +55,8 @@ class ComparableSet:
     analogue_quantiles: Mapping[str, Decimal | None]
     exclusions: Mapping[str, str]
     status: str
+    analogue_observations: tuple[AnalogueObservation, ...] = ()
+    selection_source_hashes: tuple[str, ...] = ()
 
 
 def _complete_bar(bar: MarketBar) -> bool:
@@ -86,12 +100,13 @@ def select_comparables(
     past_events: Sequence[PastEventProfile],
     as_of: datetime,
 ) -> ComparableSet:
-    """Select observable same-market securities and prior buyback events using pre-filing size and liquidity only. Return selection dates, exclusions and low-sample status; never backdate a current industry label."""
+    """Select pre-filing comparables without changing the established filters; preserve the exact source hashes and event-to-outcome pairing needed for a later cited memo."""
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as-of instant must be timezone-aware")
     exclusions: dict[str, str] = {}
     sizes: dict[str, Decimal] = {}
     liquidities: dict[str, Decimal] = {}
+    target_feature_hashes: set[str] = set()
     for instrument_id, bars in universe.items():
         prior = sorted((bar for bar in bars if bar.session < filing_date), key=lambda bar: bar.session)
         sessions = {bar.session for bar in prior}
@@ -110,6 +125,8 @@ def select_comparables(
             continue
         sizes[instrument_id] = median_cap
         liquidities[instrument_id] = median_value
+        if instrument_id == target.instrument_id:
+            target_feature_hashes.update(bar.source_hash for bar in window if bar.source_hash)
     if target.instrument_id not in sizes:
         exclusions[target.instrument_id] = "TARGET_NO_FEATURES"
     peers: tuple[str, ...] = ()
@@ -187,12 +204,23 @@ def select_comparables(
         for profile in candidates:
             exclusions.setdefault(profile.event_id, "OUTSIDE_QUINTILE")
     analogues.sort(key=lambda profile: profile.event_id)
-    outcomes = tuple(
-        profile.first_safe_intraday_excess
+    observed = [
+        profile
         for profile in analogues
         if profile.first_safe_intraday_excess is not None
         and profile.outcome_available_at is not None
         and profile.outcome_available_at.date() < filing_date
+    ]
+    outcomes = tuple(profile.first_safe_intraday_excess for profile in observed if profile.first_safe_intraday_excess is not None)
+    observations = tuple(
+        AnalogueObservation(
+            profile.event_id,
+            profile.receipt_date,
+            profile.outcome_available_at,  # type: ignore[arg-type]
+            profile.first_safe_intraday_excess,  # type: ignore[arg-type]
+            profile.source_hashes,
+        )
+        for profile in observed
     )
     if len(outcomes) >= _MIN_OUTCOMES:
         quantiles: dict[str, Decimal | None] = {
@@ -209,6 +237,10 @@ def select_comparables(
         flags.append("EMPTY_PEERS")
     if not analogues:
         flags.append("NO_ANALOGUES")
+    lineage: set[str] = set(target_feature_hashes)
+    lineage.update(digest for digest in target_materiality.source_hashes if digest)
+    for profile in past_events:
+        lineage.update(digest for digest in profile.source_hashes if digest)
     return ComparableSet(
         event_id=target_event.event_id,
         as_of=as_of,
@@ -219,6 +251,8 @@ def select_comparables(
         analogue_quantiles=quantiles,
         exclusions=exclusions,
         status="OK" if not flags else ";".join(flags),
+        analogue_observations=observations,
+        selection_source_hashes=tuple(sorted(lineage)),
     )
 
 
@@ -231,4 +265,4 @@ def _decimal_median_quantile(values: Sequence[Decimal]) -> Decimal:
     return (ordered[middle - 1] + ordered[middle]) / Decimal(2)
 
 
-__all__ = ["ComparableSet", "PastEventProfile", "select_comparables"]
+__all__ = ["AnalogueObservation", "ComparableSet", "PastEventProfile", "select_comparables"]

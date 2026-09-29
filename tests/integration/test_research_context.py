@@ -397,3 +397,89 @@ def test_future_outcome_pending(rig: dict[str, object]) -> None:
     assert context.study.first_safe_session == SAFE
     assert context.study.intraday_excess is None
     assert "PENDING" in context.study.reasons
+
+
+def test_prior_outcome_keeps_own_source_hashes(rig: dict[str, object]) -> None:
+    """A historical profile retains its own filing, denominator, and first-safe hashes."""
+    from datetime import time
+
+    from src.research.context import _profile_prior_event
+
+    catalog = rig["catalog"]
+    event_store = rig["event_store"]
+    lake = rig["lake"]
+    index_store = rig["index_store"]
+    assert isinstance(catalog, Catalog)
+    as_of = datetime(2024, 6, 29, 18, 0, tzinfo=KST)
+    cap = datetime.combine(FILING_DATE, time.min).replace(tzinfo=KST)
+    prior_as_of = min(as_of, cap)
+    pairs = event_store.list_prior_events(as_of)  # type: ignore[union-attr]
+    target = next((link, original) for link, original in pairs if original.rcept_no == "20240621000007")
+    link, original = target
+    profile = _profile_prior_event(
+        catalog, event_store, lake, index_store, link, original, prior_as_of, POLICY  # type: ignore[arg-type]
+    )
+    assert profile is not None
+    prior_filing = catalog.get_filing_asof("20240621000007", prior_as_of)
+    assert prior_filing is not None
+    assert prior_filing.raw_hash in profile.source_hashes
+    assert len(profile.source_hashes) == len(set(profile.source_hashes))
+    assert tuple(sorted(profile.source_hashes)) == profile.source_hashes
+    if profile.first_safe_intraday_excess is not None:
+        assert profile.outcome_available_at is not None
+        assert len(profile.source_hashes) >= 4
+    target_panel_hash = hashlib.sha256(f"panel:{SAFE.isoformat()}".encode()).hexdigest()
+    assert target_panel_hash not in profile.source_hashes
+
+
+def test_context_covers_selection_hashes_with_own_paths(rig: dict[str, object]) -> None:
+    """Selected and ranking-only candidate hashes each appear with their own catalog paths."""
+    context = build_research_context(
+        rig["catalog"],  # type: ignore[arg-type]
+        rig["event_store"],  # type: ignore[arg-type]
+        rig["lake"],  # type: ignore[arg-type]
+        rig["financial"],  # type: ignore[arg-type]
+        rig["index_store"],  # type: ignore[arg-type]
+        RCEPT,
+        datetime(2024, 6, 29, 18, 0, tzinfo=KST),
+        POLICY,
+    )
+    for digest in context.comparables.selection_source_hashes:
+        assert digest in context.source_hashes
+    for observation in context.comparables.analogue_observations:
+        for digest in observation.source_hashes:
+            assert digest in context.source_hashes
+    catalog = rig["catalog"]
+    assert isinstance(catalog, Catalog)
+    for digest, path in context.artifact_paths.items():
+        assert catalog.get_artifact_path(digest) == path
+    assert rig["dart_hash"] in context.artifact_paths
+
+
+def test_unavailable_first_safe_pair_withholds_outcome(rig: dict[str, object]) -> None:
+    """A missing prior index bar withholds the evidenced outcome instead of substituting hashes."""
+    from datetime import time
+
+    from src.research.context import _profile_prior_event
+
+    catalog = rig["catalog"]
+    assert isinstance(catalog, Catalog)
+    data_root = catalog.db_path.parent
+    manifest = rig["manifest"]
+    prior_safe = SESSIONS[22]
+    kept = [(market, session, digest) for (market, session), digest in manifest.entries.items() if session != prior_safe]  # type: ignore[union-attr]
+    pruned = merge_index_manifest(None, kept, data_root)
+    pruned_store = IndexStore(catalog, data_root, pruned)
+    as_of = datetime(2024, 6, 29, 18, 0, tzinfo=KST)
+    cap = datetime.combine(FILING_DATE, time.min).replace(tzinfo=KST)
+    prior_as_of = min(as_of, cap)
+    event_store = rig["event_store"]
+    pairs = event_store.list_prior_events(as_of)  # type: ignore[union-attr]
+    target = next((link, original) for link, original in pairs if original.rcept_no == "20240621000007")
+    link, original = target
+    profile = _profile_prior_event(
+        catalog, event_store, rig["lake"], pruned_store, link, original, prior_as_of, POLICY  # type: ignore[arg-type]
+    )
+    assert profile is not None
+    assert profile.first_safe_intraday_excess is None
+    assert profile.outcome_available_at is None

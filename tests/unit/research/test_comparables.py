@@ -283,3 +283,163 @@ def test_analogue_distribution_uses_only_earlier_outcomes() -> None:
     assert len(result.analogue_intraday_excess) == 6
     assert result.analogue_quantiles["median"] == Decimal("0.035")
     assert "LOW_SAMPLE" not in result.status
+
+
+def _hex_tag(number: int) -> str:
+    return format(number, "064x")
+
+
+def _lined_prior(event_id: str, number: int, excess: Decimal | None, outcome_at: datetime | None) -> PastEventProfile:
+    return PastEventProfile(
+        event_id=event_id,
+        receipt_date=date(2024, 5, 10),
+        features_available_at=datetime(2024, 5, 11, 9, 0, tzinfo=KST),
+        outcome_available_at=outcome_at,
+        market="KOSPI",
+        prior_market_cap=Decimal(5_000_000_000_000),
+        planned_amount_ratio=Decimal("0.05"),
+        first_safe_intraday_excess=excess,
+        source_hashes=(_hex_tag(number), _hex_tag(number + 1000), _hex_tag(number + 2000), _hex_tag(number + 3000)),
+    )
+
+
+def test_observation_pairing_keeps_unavailable_selection() -> None:
+    """Observed pairs match eligible excess entries while the unavailable selection stays listed."""
+    sizes = {"AAA": 1_000_000_000_000, **{f"EVT:{number:04d}": 1_000_000_000_000 for number in range(1, 36)}}
+    universe = _universe(sizes)
+    late = datetime(2024, 5, 14, 18, 0, tzinfo=KST)
+    profiles: list[PastEventProfile] = []
+    for number in range(1, 36):
+        if number <= 6:
+            profiles.append(_lined_prior(f"EVT:{number:04d}", number, Decimal(f"0.0{number}"), late))
+        elif number == 7:
+            profiles.append(_lined_prior(f"EVT:{number:04d}", number, None, None))
+        else:
+            profiles.append(_lined_prior(f"EVT:{number:04d}", number, None, None))
+    result = select_comparables(_target("AAA"), _link(), FILING_DATE, _materiality(), universe, profiles, AS_OF)
+    assert len(result.analogue_observations) == len(result.analogue_intraday_excess) == 6
+    for observation, amount in zip(result.analogue_observations, result.analogue_intraday_excess, strict=True):
+        assert observation.intraday_excess == amount
+        assert isinstance(observation.intraday_excess, Decimal)
+    assert "EVT:0007" in result.analogue_event_ids
+    assert all(obs.event_id != "EVT:0007" for obs in result.analogue_observations)
+
+
+def test_selection_lineage_covers_features_and_candidates() -> None:
+    """Sorted lineage contains every used target feature and candidate hash exactly once."""
+    sizes = {f"KRX:{number:06d}": 5_000_000_000_000 for number in range(1, 6)}
+    universe = _universe(sizes)
+    target_bars: list[MarketBar] = []
+    for position, bar in enumerate(universe["KRX:000001"]):
+        target_bars.append(
+            MarketBar(
+                instrument_id=bar.instrument_id,
+                session=bar.session,
+                open=bar.open,
+                close=bar.close,
+                market_cap=bar.market_cap,
+                listed_shares=bar.listed_shares,
+                trading_value=bar.trading_value,
+                ret_price=bar.ret_price,
+                price_state=bar.price_state,
+                gap_before=bar.gap_before,
+                share_factor=bar.share_factor,
+                available_at=bar.available_at,
+                source_hash=_hex_tag(5000 + position),
+            )
+        )
+    universe["KRX:000001"] = tuple(target_bars)
+    profiles = [_lined_prior(f"cand:{number:02d}", 7000 + number, None, None) for number in range(1, 4)]
+    materiality = _materiality()
+    result = select_comparables(_target("KRX:000001"), _link(), FILING_DATE, materiality, universe, profiles, AS_OF)
+    used_features = {bar.source_hash for bar in target_bars[-20:]}
+    expected = set(used_features) | set(materiality.source_hashes)
+    for profile in profiles:
+        expected.update(profile.source_hashes)
+    assert result.selection_source_hashes == tuple(sorted(expected))
+    assert len(result.selection_source_hashes) == len(set(result.selection_source_hashes))
+
+
+def test_future_outcome_excluded_from_distribution() -> None:
+    """A prior outcome available on or after filing stays out of the observed distribution."""
+    sizes = {"AAA": 1_000_000_000_000, **{f"EVT:{number:04d}": 1_000_000_000_000 for number in range(1, 36)}}
+    universe = _universe(sizes)
+    profiles = []
+    for number in range(1, 36):
+        if number <= 6:
+            outcome_at: datetime | None = datetime(2024, 6, 20, 18, 0, tzinfo=KST)
+            excess: Decimal | None = Decimal(f"0.0{number}")
+        elif number == 7:
+            outcome_at = datetime(2024, 6, 25, 9, 0, tzinfo=KST)
+            excess = Decimal("0.07")
+        else:
+            outcome_at = None
+            excess = None
+        profiles.append(
+            PastEventProfile(
+                event_id=f"EVT:{number:04d}",
+                receipt_date=date(2024, 6, 10),
+                features_available_at=datetime(2024, 6, 11, 9, 0, tzinfo=KST),
+                outcome_available_at=outcome_at,
+                market="KOSPI",
+                prior_market_cap=Decimal(1_000_000_000_000),
+                planned_amount_ratio=Decimal("0.05"),
+                first_safe_intraday_excess=excess,
+                source_hashes=(_hex_tag(number), _hex_tag(number + 1000), _hex_tag(number + 2000), _hex_tag(number + 3000)),
+            )
+        )
+    result = select_comparables(_target("AAA"), _link(), FILING_DATE, _materiality(), universe, profiles, AS_OF)
+    assert "EVT:0007" in result.analogue_event_ids
+    assert [obs.event_id for obs in result.analogue_observations] == [f"EVT:{number:04d}" for number in range(1, 7)]
+    assert Decimal("0.07") not in result.analogue_intraday_excess
+    assert all(_hex_tag(7) not in obs.source_hashes for obs in result.analogue_observations)
+
+
+def test_lineage_preserves_established_quantiles() -> None:
+    """Eight-outcome lineage selection keeps IDs, order, quantiles, and status unchanged."""
+    sizes = {"AAA": 1_000_000_000_000, **{f"EVT:{number:04d}": 1_000_000_000_000 for number in range(1, 42)}}
+    universe = _universe(sizes)
+    bare: list[PastEventProfile] = []
+    lined: list[PastEventProfile] = []
+    for number in range(1, 42):
+        has_outcome = number <= 8
+        outcome_at = datetime(2024, 6, 20, 18, 0, tzinfo=KST) if has_outcome else None
+        excess = Decimal(f"0.0{number}") if has_outcome else None
+        bare.append(
+            PastEventProfile(
+                event_id=f"EVT:{number:04d}",
+                receipt_date=date(2024, 6, 10),
+                features_available_at=datetime(2024, 6, 11, 9, 0, tzinfo=KST),
+                outcome_available_at=outcome_at,
+                market="KOSPI",
+                prior_market_cap=Decimal(1_000_000_000_000),
+                planned_amount_ratio=Decimal("0.05"),
+                first_safe_intraday_excess=excess,
+            )
+        )
+        lined.append(
+            PastEventProfile(
+                event_id=f"EVT:{number:04d}",
+                receipt_date=date(2024, 6, 10),
+                features_available_at=datetime(2024, 6, 11, 9, 0, tzinfo=KST),
+                outcome_available_at=outcome_at,
+                market="KOSPI",
+                prior_market_cap=Decimal(1_000_000_000_000),
+                planned_amount_ratio=Decimal("0.05"),
+                first_safe_intraday_excess=excess,
+                source_hashes=(_hex_tag(number), _hex_tag(number + 1000), _hex_tag(number + 2000), _hex_tag(number + 3000)),
+            )
+        )
+    plain = select_comparables(_target("AAA"), _link(), FILING_DATE, _materiality(), universe, bare, AS_OF)
+    proved = select_comparables(_target("AAA"), _link(), FILING_DATE, _materiality(), universe, lined, AS_OF)
+    assert len(proved.analogue_intraday_excess) == 8
+    assert proved.analogue_event_ids == plain.analogue_event_ids
+    assert proved.analogue_intraday_excess == plain.analogue_intraday_excess
+    assert proved.analogue_quantiles == plain.analogue_quantiles
+    assert proved.status == plain.status
+    assert [obs.event_id for obs in proved.analogue_observations] == [
+        f"EVT:{number:04d}" for number in range(1, 9)
+    ]
+    assert proved.analogue_quantiles["p25"] == Decimal("0.02")
+    assert proved.analogue_quantiles["median"] == Decimal("0.045")
+    assert proved.analogue_quantiles["p75"] == Decimal("0.06")

@@ -225,6 +225,7 @@ def _profile_prior_event(
     prior_as_of: datetime,
     policy: StudyPolicy,
 ) -> PastEventProfile | None:
+    """Build one historical profile from information observable before the target filing and retain exact filing, denominator, and first-safe-bar hashes."""
     resolved = event_store.get_event_asof(original.rcept_no, prior_as_of)
     if resolved is None:
         return None
@@ -261,11 +262,29 @@ def _profile_prior_event(
         active_link, versions, prior_filing, stock_window, index_window, "INCOMPLETE", prior_as_of, policy
     )
     outcome_at: datetime | None = None
-    if study.first_safe_session is not None and study.intraday_excess is not None:
+    intraday: Decimal | None = study.intraday_excess
+    if study.first_safe_session is not None and intraday is not None:
         for bar in stock_window:
             if bar.session == study.first_safe_session and bar.available_at <= prior_as_of:
                 outcome_at = bar.available_at
                 break
+    profile_source_hashes: set[str] = {prior_filing.raw_hash, active_parsed.document_hash, prior_bar.source_hash}
+    if intraday is not None and outcome_at is not None and study.first_safe_session is not None:
+        stock_hash: str | None = None
+        index_hash: str | None = None
+        for stock_bar in stock_window:
+            if stock_bar.session == study.first_safe_session:
+                stock_hash = stock_bar.source_hash
+                break
+        for index_bar in index_window:
+            if index_bar.session == study.first_safe_session:
+                index_hash = index_bar.source_hash
+                break
+        if stock_hash and index_hash:
+            profile_source_hashes.add(stock_hash)
+            profile_source_hashes.add(index_hash)
+    if outcome_at is None:
+        intraday = None
     return PastEventProfile(
         event_id=link.event_id,
         receipt_date=original.receipt_date,
@@ -274,7 +293,8 @@ def _profile_prior_event(
         market=match.market,
         prior_market_cap=Decimal(prior_bar.market_cap),
         planned_amount_ratio=materiality.amount_to_market_cap,
-        first_safe_intraday_excess=study.intraday_excess,
+        first_safe_intraday_excess=intraday,
+        source_hashes=tuple(sorted(profile_source_hashes)),
     )
 
 
@@ -288,7 +308,7 @@ def build_research_context(
     as_of: datetime,
     policy: StudyPolicy,
 ) -> ResearchContext:
-    """Assemble one receipt-specific, source-backed research view at an aware as_of instant. Raise ResearchUnavailable with a reason code for missing local inputs, unresolved identity or event link; leave unavailable outcomes pending rather than using future data."""
+    """Assemble a point-in-time research view whose source inventory includes the inputs of every published analogue selection."""
     if not rcept_no:
         raise ValueError("receipt number must be non-empty")
     _require_aware(as_of, "as_of")
@@ -382,6 +402,7 @@ def build_research_context(
     hashes.update(bar.source_hash for bar in index_bars)
     hashes.update(study.evidence_hashes)
     hashes.update(digest for _, _, digest in confounding_receipts)
+    hashes.update(comparables.selection_source_hashes)
     source_hashes = tuple(sorted(hashes))
     artifact_paths = {
         digest: path
