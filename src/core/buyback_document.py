@@ -16,9 +16,11 @@ from xml.etree import ElementTree as ET
 from src.data.catalog import FilingVersion
 
 _DATE_RE = re.compile(r"^[0-9]{8}$")
+_FIRST_SUBMISSION_LABEL = re.compile(r"정정대상\s*공시서류의\s*최초제출일")
 _FIRST_SUBMISSION_RE = re.compile(
-    r"정정대상\s*공시서류의\s*최초제출일\s*:\s*(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일"
+    r"(?<!\d)(\d{4})\s*(?:년|월|[.\-/])\s*(\d{1,2})\s*(?:월|[.\-/])\s*(\d{1,2})\s*일?"
 )
+_SHORT_SUBMISSION_RE = re.compile(r"[`'](\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})")
 
 _EXPECTED_SECTION = "자기주식 취득 결정"
 _XML_AMPERSAND_RE = re.compile(r"&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9A-Fa-f]+;)")
@@ -163,12 +165,24 @@ def _first_submission_date(root: ET.Element, filing: FilingVersion) -> date | No
     if not filing.correction_flag and not filing.withdrawal_flag:
         return filing.receipt_date
     found: set[date] = set()
-    for element in root.iter("P"):
-        match = _FIRST_SUBMISSION_RE.search(_element_text(element))
-        if match is None:
+    for element in root.iter():
+        if element.tag not in {"P", "TR"}:
+            continue
+        content = _element_text(element)
+        label = _FIRST_SUBMISSION_LABEL.search(content)
+        if label is None:
+            continue
+        value = content[label.end():]
+        match = _FIRST_SUBMISSION_RE.search(value)
+        short = _SHORT_SUBMISSION_RE.search(value) if match is None else None
+        if match is None and short is None:
             continue
         try:
-            found.add(date(*(int(group) for group in match.groups())))
+            if match is not None:
+                found.add(date(*(int(group) for group in match.groups())))
+            else:
+                assert short is not None
+                found.add(date(2000 + int(short[1]), int(short[2]), int(short[3])))
         except ValueError:
             return None
     if len(found) != 1:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
@@ -61,6 +62,11 @@ class EventStore:
                 event_id TEXT PRIMARY KEY,
                 rcept_nos TEXT NOT NULL,
                 status TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS buyback_viewer_parent (
+                correction_rcept_no TEXT PRIMARY KEY,
+                original_rcept_no TEXT NOT NULL,
+                viewer_hash TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS event_schema_version (
                 version INTEGER PRIMARY KEY,
@@ -164,7 +170,11 @@ class EventStore:
         parsed = self._all_parsed()
         if not filings:
             return
-        links = link_buyback_versions(filings, parsed)
+        parents = {
+            str(row["correction_rcept_no"]): str(row["original_rcept_no"])
+            for row in self._conn.execute("SELECT correction_rcept_no, original_rcept_no FROM buyback_viewer_parent")
+        }
+        links = link_buyback_versions(filings, parsed, parents)
         self._conn.execute("DELETE FROM event_link")
         for link in links:
             self._conn.execute(
@@ -212,6 +222,57 @@ class EventStore:
                             fact.evidence.document_hash,
                         ),
                     )
+            self._refresh_links()
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def register_viewer_parent(self, correction_no: str, original_no: str, viewer_html: bytes, viewer_hash: str) -> None:
+        """Link a correction only when its archived official DART family selector names exactly one original."""
+        import hashlib
+
+        if hashlib.sha256(viewer_html).hexdigest() != viewer_hash:
+            raise ValueError("viewer hash mismatch")
+        artifact = self._catalog.get_artifact_path(viewer_hash)
+        if artifact is None or (self._db_path.parent / artifact).read_bytes() != viewer_html:
+            raise ValueError("viewer source is not registered locally")
+        source = self._conn.execute(
+            "SELECT 1 FROM raw_artifact WHERE sha256=? AND source='dart' AND endpoint='viewer' AND request_key=?",
+            (viewer_hash, correction_no),
+        ).fetchone()
+        if source is None:
+            raise ValueError("viewer source identity mismatch")
+        try:
+            html = viewer_html.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("invalid viewer encoding") from exc
+        family = set(re.findall(r'<option value="rcpNo=(\d{14})" title="([^"]+)"', html))
+        ids = {number for number, _ in family}
+        if ids != {correction_no, original_no} or len(family) != 2:
+            raise ValueError("ambiguous DART family selector")
+        filings = {filing.rcept_no: filing for filing in self._all_filings()}
+        correction = filings.get(correction_no)
+        original = filings.get(original_no)
+        if correction is None or original is None or not correction.correction_flag or original.correction_flag:
+            raise ValueError("viewer parent is not an original/correction pair")
+        if correction.corp_code != original.corp_code or correction.receipt_date < original.receipt_date:
+            raise ValueError("viewer parent company or chronology mismatch")
+        if correction.report_name.split("]")[-1].strip() != original.report_name.split("]")[-1].strip():
+            raise ValueError("viewer parent form mismatch")
+        if {title.replace(" ", "") for _, title in family} != {"주요사항보고서(자기주식취득결정)"}:
+            raise ValueError("viewer parent form is not buyback decision")
+        existing = self._conn.execute(
+            "SELECT original_rcept_no, viewer_hash FROM buyback_viewer_parent WHERE correction_rcept_no=?", (correction_no,)
+        ).fetchone()
+        if existing is not None and (str(existing["original_rcept_no"]), str(existing["viewer_hash"])) != (original_no, viewer_hash):
+            raise ValueError("conflicting viewer parent")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "INSERT OR IGNORE INTO buyback_viewer_parent VALUES (?, ?, ?)",
+                (correction_no, original_no, viewer_hash),
+            )
             self._refresh_links()
             self._conn.commit()
         except BaseException:

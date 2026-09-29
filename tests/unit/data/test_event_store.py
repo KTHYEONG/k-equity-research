@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -160,6 +161,33 @@ def test_unresolved_event_withheld_while_raw_receipts_stay_auditable(tmp_path: P
     assert store.list_prior_events(as_of) == ()
     assert store.get_receipt("20240626000207") is not None
     assert store.get_receipt("20240626000208") is not None
+
+
+def test_archived_dart_viewer_resolves_missing_correction_date(tmp_path: Path) -> None:
+    catalog, store = _open(tmp_path)
+    original = _register(catalog, "20240626000207", date(2024, 6, 26))
+    correction = replace(_register(catalog, "20240626000369", date(2024, 6, 28), parent="20240626000207"), parent_rcept_no=None)
+    catalog._conn.execute("UPDATE filing_version SET parent_rcept_no=NULL WHERE rcept_no=?", (correction.rcept_no,))  # noqa: SLF001
+    catalog._conn.commit()  # noqa: SLF001
+    store.store_parsed_batch([original, correction], [
+        _parsed(original.rcept_no, "84,775", original.receipt_date),
+        replace(_parsed(correction.rcept_no, "84,795", correction.receipt_date), first_submission_date=None),
+    ])
+    assert store.get_event_asof(correction.rcept_no, datetime(2024, 6, 29, tzinfo=KST)) is None
+    viewer = (
+        '<option value="rcpNo=20240626000369" title="주요사항보고서(자기주식취득결정)">'
+        '<option value="rcpNo=20240626000207" title="주요사항보고서(자기주식취득결정)">'
+    ).encode()
+    digest = catalog.register_artifact(
+        "dart", "viewer", correction.rcept_no, "test", viewer,
+        datetime(2024, 6, 29, tzinfo=KST), PurePosixPath("raw/dart/viewer.html"),
+    )
+    with pytest.raises(ValueError, match="viewer hash"):
+        store.register_viewer_parent(correction.rcept_no, original.rcept_no, viewer, "0" * 64)
+    store.register_viewer_parent(correction.rcept_no, original.rcept_no, viewer, digest)
+    result = store.get_event_asof(correction.rcept_no, datetime(2024, 6, 29, tzinfo=KST))
+    assert result is not None
+    assert result[0].rcept_nos == (original.rcept_no, correction.rcept_no)
 
 
 def test_withdrawn_event_inactive_while_original_replayable(tmp_path: Path) -> None:

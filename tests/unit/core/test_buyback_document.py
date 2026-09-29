@@ -119,6 +119,18 @@ def test_correction_reads_first_submission_date_from_document() -> None:
     assert parsed.first_submission_date == date(2024, 6, 26)
 
 
+@pytest.mark.parametrize("value", ["2024-06-26", "2024.6.26", "2024년 06월 26일", "`24.6.26"])
+def test_correction_reads_first_submission_date_from_table(value: str) -> None:
+    xml = (
+        '<?xml version="1.0" encoding="utf-8"?><DOCUMENT><BODY><TABLE><TR>'
+        f'<TD>정정대상 공시서류의 최초제출일</TD><TD>{value}</TD>'
+        '</TR></TABLE></BODY></DOCUMENT>'
+    )
+    raw = _zip_with_names({"correction.xml": xml.encode("utf-8")})
+    filing = replace(_filing(CORR, raw, date(2024, 6, 28)), correction_flag=True)
+    assert parse_buyback_document(filing, raw, DocumentLimits()).first_submission_date == date(2024, 6, 26)
+
+
 def test_correction_without_first_submission_date_stays_unresolved() -> None:
     raw = _wrap(_row("1. 취득예정주식(주)", "보통주식", "ACQ_OSTK", "100"))
     filing = replace(_filing(CORR, raw, date(2024, 6, 28)), correction_flag=True)

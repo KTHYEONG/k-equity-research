@@ -335,6 +335,15 @@ def _collect(
     keep_hashes |= _pinned_index_hashes(root, catalog, lake)
     keep_hashes |= _filing_hashes(catalog)
     _check_event_links(catalog)
+    for row in catalog._conn.execute("SELECT viewer_hash FROM buyback_viewer_parent").fetchall():  # noqa: SLF001
+        digest = str(row["viewer_hash"])
+        relative = catalog.get_artifact_path(digest)
+        if relative is None:
+            raise ValueError("missing DART lineage viewer artifact")
+        target = checked_local_path(root, relative)
+        if target.is_symlink() or not target.is_file() or _sha256_file(target) != digest:
+            raise ValueError("changed DART lineage viewer artifact")
+        keep_hashes.add(digest)
 
     gaps = hydrate_event_financial_evidence(
         catalog, event_store, FinancialEvidence(root, lake), root, _FAR_FUTURE

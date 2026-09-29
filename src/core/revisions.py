@@ -46,7 +46,8 @@ def _event_id(corp_code: str, root_rcept_no: str) -> str:
 
 
 def link_buyback_versions(
-    filings: Sequence[FilingVersion], parsed: Mapping[str, ParsedBuyback]
+    filings: Sequence[FilingVersion], parsed: Mapping[str, ParsedBuyback],
+    verified_parents: Mapping[str, str] | None = None,
 ) -> tuple[EventLink, ...]:
     """Group filing receipts only when company, report form, initial submission date and document references establish one event. Preserve ambiguous same-day reports separately for review."""
     index: dict[str, FilingVersion] = {}
@@ -54,9 +55,10 @@ def link_buyback_versions(
         if filing.rcept_no and filing.rcept_no not in index:
             index[filing.rcept_no] = filing
 
+    verified_parents = verified_parents or {}
     inferred_parents: dict[str, str] = {}
     for filing in index.values():
-        if not filing.correction_flag or filing.parent_rcept_no is not None:
+        if not filing.correction_flag or filing.parent_rcept_no is not None or filing.rcept_no in verified_parents:
             continue
         first_date = parsed.get(filing.rcept_no)
         if first_date is None or first_date.first_submission_date is None:
@@ -80,7 +82,7 @@ def link_buyback_versions(
         current = rcept_no
         while True:
             filing = index[current]
-            parent = filing.parent_rcept_no or inferred_parents.get(current)
+            parent = filing.parent_rcept_no or verified_parents.get(current) or inferred_parents.get(current)
             if parent is None:
                 return current
             if parent not in index or parent in seen:
@@ -123,7 +125,8 @@ def link_buyback_versions(
             unresolved = True
         for item in members:
             member_parsed = parsed.get(item.rcept_no)
-            if member_parsed is None or member_parsed.first_submission_date != root.receipt_date:
+            has_verified_parent = verified_parents.get(item.rcept_no) == root.rcept_no
+            if member_parsed is None or (not has_verified_parent and member_parsed.first_submission_date != root.receipt_date):
                 unresolved = True
             if item.corp_code != root.corp_code:
                 unresolved = True
