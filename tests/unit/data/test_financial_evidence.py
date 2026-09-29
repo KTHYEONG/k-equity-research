@@ -307,6 +307,23 @@ def test_legacy_krw_label_uses_explicit_dart_foreign_currency(tmp_path: Path) ->
     assert facts[0].value == Decimal("1000")
 
 
+@pytest.mark.parametrize("currency", ["CNY", "GBP", "HKD", "JPY", "USD"])
+def test_corrected_index_unit_verifies_against_original_record(tmp_path: Path, currency: str) -> None:
+    record = _record("20240514001363", "assets", "1000")
+    record["source_kind"] = "opendart_standard"
+    record["currency"] = currency
+    evidence = _setup(
+        tmp_path, [record],
+        [{"filing_id": "20240514001363", "fact": "assets", "available_at": ELIGIBLE, "value": 1000.0}],
+    )
+    row = _index_rows([{"filing_id": "20240514001363", "fact": "assets", "available_at": ELIGIBLE, "value": 1000.0, "source_hash": "a" * 64}]).to_dicts()[0]
+    row["unit"] = currency
+    row["source_hash"] = "a" * 64
+    verified = evidence._verify_row(row, [record])  # noqa: SLF001 - exact row contract
+    assert verified is not None
+    assert verified.unit == currency
+
+
 def test_document_fact_requires_local_hash_verified_zip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.data.dart_statements.document_statements import (
         PARSER_VERSION, DocumentParseResult, PeriodBasis, StatementFact, VerifiedStatements,

@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_data_root(lineage)
     retain = data_sub.add_parser("retain-build", help="Build verified time-scoped research datasets.")
     _add_data_root(retain)
+    financial_v2 = data_sub.add_parser("publish-financial-v2", help="Publish source-currency-corrected financial index.")
+    _add_data_root(financial_v2)
     backfill = data_sub.add_parser("backfill-index", help="Backfill official KOSPI/KOSDAQ bars for retained sessions.")
     backfill.add_argument("--start", required=True, help="Retained interval start YYYY-MM-DD.")
     backfill.add_argument("--end", required=True, help="Retained interval end YYYY-MM-DD.")
@@ -75,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         "collect-disclosure-context", help="Collect all-category DART evidence around accepted event windows."
     )
     disclosure.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2024-06-28T09:00:00+09:00.")
+    disclosure.add_argument("--event-id", default=None, help="Limit collection to one accepted event.")
     _add_data_root(disclosure)
     financial = data_sub.add_parser("collect-financial", help="Collect one official OpenDART financial statement.")
     financial.add_argument("--corp-code", required=True, help="8-digit OpenDART corp code.")
@@ -208,6 +211,20 @@ def _run_retain_build(args: argparse.Namespace) -> int:
         )
         + "\n"
     )
+    return 0
+
+
+def _run_publish_financial_v2(args: argparse.Namespace) -> int:
+    from src.data.financial_index_v2 import publish_financial_index_v2
+
+    result = publish_financial_index_v2(_resolve_data_root(args.data_root))
+    sys.stdout.write(json.dumps({
+        "rows": result.row_count,
+        "corrected_rows": result.corrected_rows,
+        "corrected_hashes": result.corrected_hashes,
+        "currencies": list(result.currencies),
+        "manifest": str(result.manifest_path),
+    }) + "\n")
     return 0
 
 
@@ -372,6 +389,7 @@ def _run_collect_disclosure_context(args: argparse.Namespace) -> int:
             root,
             as_of,
             snapshot_id,
+            args.event_id,
         )
     finally:
         http_client.close()
@@ -789,6 +807,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_register_lineage(args)
         if args.command == "data" and args.data_command == "retain-build":
             return _run_retain_build(args)
+        if args.command == "data" and args.data_command == "publish-financial-v2":
+            return _run_publish_financial_v2(args)
         if args.command == "data" and args.data_command == "backfill-index":
             return _run_backfill_index(args)
         if args.command == "data" and args.data_command == "backfill-dart":

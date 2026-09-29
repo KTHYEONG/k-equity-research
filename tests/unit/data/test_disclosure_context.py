@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.data.catalog import Catalog, FilingVersion
-from src.data.disclosure_context import collect_event_disclosure_context, get_event_coverage
+from src.data.disclosure_context import collect_event_disclosure_context, get_event_coverage, verified_event_confound
 from src.data.event_store import EventStore
 from src.data.local_lake import LocalLake
 from src.integrations.dart import DartListPage, DartListRow, DartSourceError
@@ -167,3 +167,37 @@ def test_completed_window_fails_when_document_disappears(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="incomplete DART documents"):
         collect_event_disclosure_context(client, catalog, store, lake, policy, root, _AS_OF, _SNAPSHOT)
     assert client.pages == [1]
+
+
+def test_confound_requires_complete_hash_verified_window(tmp_path: Path) -> None:
+    root, catalog, store, lake = _rig(tmp_path)
+    policy = StudyPolicy(estimation_start=0, horizons=(1,))
+    snapshot = "disclosure-context-20240629-090000p0900"
+    client = _DocumentClient()
+    client.fail_document = False
+    before = verified_event_confound(
+        catalog, root, lake, "event-1", _CORP, _DAY, frozenset({_RECEIPT}), _AS_OF, policy,
+    )
+    assert before == ("INCOMPLETE", ())
+    collect_event_disclosure_context(client, catalog, store, lake, policy, root, _AS_OF, snapshot)
+    status, receipts = verified_event_confound(
+        catalog, root, lake, "event-1", _CORP, _DAY, frozenset({_RECEIPT}), _AS_OF, policy,
+    )
+    assert status == "KNOWN_CONFOUNDED"
+    assert receipts[0][:2] == ("20240627000001", "기타 공시")
+    artifact = catalog.find_artifact("dart", "document", "20240627000001", snapshot)
+    assert artifact is not None
+    (root / artifact.local_relative_path).write_bytes(b"changed")
+    assert verified_event_confound(
+        catalog, root, lake, "event-1", _CORP, _DAY, frozenset({_RECEIPT}), _AS_OF, policy,
+    ) == ("INCOMPLETE", ())
+
+
+def test_confound_clear_requires_terminal_empty_list(tmp_path: Path) -> None:
+    root, catalog, store, lake = _rig(tmp_path)
+    policy = StudyPolicy(estimation_start=0, horizons=(1,))
+    snapshot = "disclosure-context-20240629-090000p0900"
+    collect_event_disclosure_context(_ListClient(None), catalog, store, lake, policy, root, _AS_OF, snapshot)
+    assert verified_event_confound(
+        catalog, root, lake, "event-1", _CORP, _DAY, frozenset({_RECEIPT}), _AS_OF, policy,
+    ) == ("KNOWN_CLEAR", ())

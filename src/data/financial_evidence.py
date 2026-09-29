@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from src.data.dart_statements.document_statements import PARSER_VERSION, DocumentParseResult, parse_filing_document
-from src.data.local_lake import FACTS_DATASET_ID, LocalLake
+from src.data.local_lake import LocalLake
 from src.data.local_paths import checked_local_path
 
 _EVIDENCE_DIRNAME = "financial_evidence"
@@ -231,15 +232,17 @@ class FinancialEvidence:
             return None
         source_currency = next(iter(currencies)) if currencies else None
         legacy_foreign_unit = (
-            unit == "KRW"
-            and source_currency in {"USD", "JPY", "HKD"}
+            isinstance(source_currency, str)
+            and re.fullmatch(r"[A-Z]{3}", source_currency) is not None
+            and source_currency != "KRW"
+            and unit in {"KRW", source_currency}
             and all(record.get("source_kind") == "opendart_standard" and record.get("unit") == "KRW" for _, record in matches)
         )
         effective_unit = str(source_currency) if legacy_foreign_unit else unit
         hint = row.get("value")
         candidates: list[tuple[int, dict[str, Any], Decimal]] = []
         for index, record in matches:
-            if record.get("currency") != effective_unit or record.get("unit") != unit:
+            if record.get("currency") != effective_unit or record.get("unit") != ("KRW" if legacy_foreign_unit else unit):
                 continue
             if (
                 not record.get("account_id")
@@ -300,7 +303,7 @@ class FinancialEvidence:
         if not fact_names:
             return ()
         try:
-            parts = self._lake.dataset_parts(FACTS_DATASET_ID)
+            parts = self._lake.financial_parts()
         except ValueError:
             return ()
         if not parts:

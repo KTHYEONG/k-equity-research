@@ -167,6 +167,7 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
         "peer_count": str(len(context.comparables.peer_ids)),
         "analogue_count": str(len(context.comparables.analogue_event_ids)),
         "analogue_outcome_count": str(len(context.comparables.analogue_intraday_excess)),
+        "confounding_receipt_count": str(len(context.confounding_receipts)),
     }
     for horizon in sorted(context.study.horizon_car):
         metrics[f"car_h{horizon}"] = _format_decimal(context.study.horizon_car[horizon])
@@ -278,6 +279,18 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
         )
     if context.event.status in ("UNRESOLVED_LINK", "WITHDRAWN"):
         statuses.add(context.event.status)
+    for receipt_no, report_name, digest in context.confounding_receipts:
+        path = context.artifact_paths.get(digest)
+        if path is None:
+            statuses.add("CONFOUND_CHECK_INCOMPLETE")
+            continue
+        ref_id = f"confound-{receipt_no}"
+        evidence.append(EvidenceRef(ref_id, "dart_filing_zip", path, digest, f"rcept={receipt_no}"))
+        claims.append(MemoClaim(
+            "concurrent_disclosure",
+            f"Issuer filed {report_name} under receipt {receipt_no} in the event study window.",
+            (ref_id,), None,
+        ))
     for reason in context.study.reasons:
         if reason == "TIME_AMBIGUOUS":
             statuses.add("TIME_AMBIGUOUS")

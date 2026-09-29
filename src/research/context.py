@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from src.core.buyback_document import ParsedBuyback
 from src.core.revisions import EventLink
 from src.data.catalog import Catalog, FilingVersion
+from src.data.disclosure_context import verified_event_confound
 from src.data.event_store import EventStore
 from src.data.financial_evidence import FinancialEvidence, VerifiedFinancialFact
 from src.data.index_store import IndexStore
@@ -61,6 +62,7 @@ class ResearchContext:
     snapshot_ids: tuple[str, ...]
     source_hashes: tuple[str, ...]
     artifact_paths: Mapping[str, PurePosixPath]
+    confounding_receipts: tuple[tuple[str, str, str], ...] = ()
 
 
 def _require_aware(value: datetime, label: str) -> None:
@@ -348,10 +350,15 @@ def build_research_context(
             )
     if withdrawn:
         study = _withheld_study(event, filing, as_of, policy)
+        confounding_receipts: tuple[tuple[str, str, str], ...] = ()
     else:
         versions = _eligible_versions(catalog, event, as_of)
+        confound_check, confounding_receipts = verified_event_confound(
+            catalog, catalog.db_path.parent, lake, event.event_id, filing.corp_code,
+            filing.receipt_date, frozenset(event.rcept_nos), as_of, policy,
+        )
         study = study_buyback(
-            event, versions, filing, stock_bars, index_bars, "INCOMPLETE", as_of, policy
+            event, versions, filing, stock_bars, index_bars, confound_check, as_of, policy
         )
         if study.first_safe_session is None:
             study = _pending_when_session_known(lake, event, filing, as_of, policy, study)
@@ -374,6 +381,7 @@ def build_research_context(
     hashes.update(bar.source_hash for bar in stock_bars)
     hashes.update(bar.source_hash for bar in index_bars)
     hashes.update(study.evidence_hashes)
+    hashes.update(digest for _, _, digest in confounding_receipts)
     source_hashes = tuple(sorted(hashes))
     artifact_paths = {
         digest: path
@@ -398,6 +406,7 @@ def build_research_context(
         snapshot_ids=_snapshot_ids(catalog, source_hashes),
         source_hashes=source_hashes,
         artifact_paths=artifact_paths,
+        confounding_receipts=confounding_receipts,
     )
 
 

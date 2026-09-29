@@ -15,7 +15,6 @@ from src.data.catalog import Catalog
 from src.data.dart_statements.document_statements import DocumentParseResult
 from src.data.event_store import EventStore
 from src.data.financial_evidence import _FACT_COLUMNS, FinancialEvidence
-from src.data.local_lake import FACTS_DATASET_ID
 from src.integrations.dart import FinancialStatementRequest
 
 _FACT_NAMES = frozenset(
@@ -106,7 +105,7 @@ def hydrate_event_financial_evidence(
         return HydrationSummary(0, 0, 0, (), ())
     lake = financial_evidence._lake  # noqa: SLF001
     try:
-        parts = lake.dataset_parts(FACTS_DATASET_ID)
+        parts = lake.financial_parts()
     except ValueError:
         return HydrationSummary(len(issuers), 0, 0, (), ())
     if not parts:

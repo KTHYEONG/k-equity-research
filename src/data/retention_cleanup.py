@@ -26,7 +26,7 @@ from src.data.financial_evidence import FinancialEvidence
 from src.data.financial_hydration import hydrate_event_financial_evidence
 from src.data.imports import ImportManifest, ImportPart
 from src.data.index_store import load_index_manifest
-from src.data.local_lake import LocalLake
+from src.data.local_lake import FACTS_V2_DATASET_ID, LocalLake
 from src.data.local_paths import checked_data_path, checked_local_path
 from src.data.retention import (
     DERIVED_FACTS_DATASET_ID,
@@ -309,13 +309,17 @@ def _collect(
     retired_run_ids: frozenset[str],
 ) -> _Collection:
     manifests = {dataset_id: _read_manifest(root, dataset_id) for dataset_id in _ACTIVE_IDS}
+    v2_manifest_path = checked_local_path(root, PurePosixPath("imports") / FACTS_V2_DATASET_ID / "manifest.json")
+    if v2_manifest_path.is_file():
+        manifests[FACTS_V2_DATASET_ID] = _read_manifest(root, FACTS_V2_DATASET_ID)
+    active_ids = tuple(manifests)
     active_parts: dict[Path, int] = {}
     for dataset_id, manifest in manifests.items():
         for part in manifest.parts:
             target = _verify_part_file(root, dataset_id, part)
             active_parts[target.resolve()] = part.byte_length
     retained_files: dict[Path, int] = dict(active_parts)
-    for dataset_id in _ACTIVE_IDS:
+    for dataset_id in active_ids:
         manifest_path = checked_local_path(root, PurePosixPath("imports") / dataset_id / "manifest.json")
         retained_files[manifest_path.resolve()] = manifest_path.stat().st_size
 
@@ -324,12 +328,13 @@ def _collect(
             checked_local_path(root, PurePosixPath("imports") / dataset_id / part.relative_path)
             for part in manifests[dataset_id].parts
         ]
-        for dataset_id in _ACTIVE_IDS
+        for dataset_id in active_ids
     }
     keep_hashes = _dataset_hashes(
         part_paths[DERIVED_PANEL_DATASET_ID]
         + part_paths[DERIVED_UNIVERSE_DATASET_ID]
         + part_paths[DERIVED_FACTS_DATASET_ID]
+        + part_paths.get(FACTS_V2_DATASET_ID, [])
     )
     lake = LocalLake(root, manifests)
     keep_hashes |= _pinned_index_hashes(root, catalog, lake)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import re
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from src.data.catalog import Catalog
 from src.data.dart_ingest import build_filing_version
@@ -219,6 +222,65 @@ def get_event_coverage(catalog: Catalog, event_id: str, snapshot_id: str) -> tup
     )
 
 
+def verified_event_confound(
+    catalog: Catalog,
+    data_root: Path,
+    lake: LocalLake,
+    event_id: str,
+    corp_code: str,
+    receipt_date: date,
+    excluded_receipts: frozenset[str],
+    as_of: datetime,
+    policy: StudyPolicy,
+) -> tuple[Literal["KNOWN_CLEAR", "KNOWN_CONFOUNDED", "INCOMPLETE"], tuple[tuple[str, str, str], ...]]:
+    """Classify an issuer outcome window only after every list page and document is verified."""
+    _require_aware(as_of, "as_of")
+    bounds = _study_session_bounds(lake, receipt_date, policy)
+    if bounds is None or as_of.astimezone(ZoneInfo("Asia/Seoul")).date() < bounds[1]:
+        return "INCOMPLETE", ()
+    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
+    ceiling = f"disclosure-context-{stamp}"
+    try:
+        with closing(sqlite3.connect(f"file:{catalog.db_path}?mode=ro", uri=True)) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT snapshot_id FROM checkpoint WHERE job=? AND snapshot_id<=? ORDER BY snapshot_id DESC",
+                (_JOB, ceiling),
+            ).fetchall()
+    except sqlite3.Error:
+        return "INCOMPLETE", ()
+    candidates = [str(row[0]) for row in rows if str(row[0]).startswith("disclosure-context-")]
+    snapshot_id = ""
+    for candidate in candidates:
+        valid = True
+        for start, end in _split_request_window(*bounds):
+            window = _window_key(corp_code, start, end)
+            pages, terminal = _parse_cursor(catalog.load_checkpoint(_JOB, window, candidate))
+            if not terminal or pages < 1 or any(
+                not _artifact_valid(catalog, data_root, candidate, _LIST_ENDPOINT, f"{window}:page-{number}")
+                for number in range(1, pages + 1)
+            ):
+                valid = False
+                break
+        if valid:
+            snapshot_id = candidate
+            break
+    if not snapshot_id:
+        return "INCOMPLETE", ()
+    entries = get_event_coverage(catalog, event_id, snapshot_id)
+    found: dict[str, tuple[str, str, str]] = {}
+    for entry in entries:
+        if not entry.document_ok or not _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, entry.rcept_no):
+            return "INCOMPLETE", ()
+        if not (receipt_date <= entry.receipt_date <= bounds[1]) or entry.rcept_no in excluded_receipts:
+            continue
+        artifact = catalog.find_artifact("dart", _DOC_ENDPOINT, entry.rcept_no, snapshot_id)
+        if artifact is None:
+            return "INCOMPLETE", ()
+        found[entry.rcept_no] = (entry.rcept_no, entry.report_name, artifact.sha256)
+    receipts = tuple(found[key] for key in sorted(found))
+    return ("KNOWN_CONFOUNDED" if receipts else "KNOWN_CLEAR", receipts)
+
+
 def _table_row(info: dict[str, object], corp_code: str) -> object:
     """Rebuild a filing-version-compatible row from retained receipt metadata."""
     from types import SimpleNamespace
@@ -266,6 +328,7 @@ def collect_event_disclosure_context(
     data_root: Path,
     as_of: datetime,
     snapshot_id: str,
+    event_id: str | None = None,
 ) -> DisclosureContextSummary:
     """Collect official all-category filings around accepted event windows.
 
@@ -281,6 +344,10 @@ def collect_event_disclosure_context(
     _ensure_schema(catalog)
 
     prior_events = event_store.list_prior_events(as_of)
+    if event_id is not None:
+        prior_events = tuple((link, filing) for link, filing in prior_events if link.event_id == event_id)
+        if not prior_events:
+            raise ValueError(f"unknown eligible event: {event_id}")
     # Group accepted events by exact issuer-window identity so overlapping
     # windows share one fetch while keeping every event association.
     groups: dict[tuple[str, date, date], list[str]] = {}
@@ -533,4 +600,5 @@ __all__ = [
     "DisclosureContextSummary",
     "collect_event_disclosure_context",
     "get_event_coverage",
+    "verified_event_confound",
 ]

@@ -19,6 +19,7 @@ from src.data.local_paths import checked_local_path
 PANEL_DATASET_ID = "market_panel_from_20220707_v1"
 UNIVERSE_DATASET_ID = "ordinary_universe_from_20220707_v1"
 FACTS_DATASET_ID = "financial_facts_from_20220101_v1"
+FACTS_V2_DATASET_ID = "financial_facts_from_20220101_v2"
 SecurityStatus = Literal["OK", "AMBIGUOUS", "MISSING", "MISSING_LOCAL"]
 
 ORDINARY_SHARE_KIND = "보통주"
@@ -206,6 +207,10 @@ class LocalLake:
             return self._parts[dataset_id]
         except KeyError:
             raise ValueError(f"dataset not registered locally: {dataset_id}") from None
+
+    def financial_parts(self) -> tuple[Path, ...]:
+        """Prefer the corrected immutable index when it is registered locally."""
+        return self.dataset_parts(FACTS_V2_DATASET_ID if FACTS_V2_DATASET_ID in self._parts else FACTS_DATASET_ID)
 
     def previous_session(self, before: date) -> date | None:
         """Return the last validated local KRX session strictly before the date; return None when coverage is insufficient."""
