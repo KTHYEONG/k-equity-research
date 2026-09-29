@@ -37,13 +37,14 @@ _QUARTER_REPRT = {"1": "11013", "2": "11012", "3": "11014", "4": "11011"}
 
 @dataclass(frozen=True, slots=True)
 class HydrationSummary:
-    """Report verified event-corp financial evidence and remaining gaps."""
+    """Separate absent or corrupt source payloads from present but unverified financial rows."""
 
     event_corp_count: int
     required_hash_count: int
     verified_hash_count: int
     missing_hashes: tuple[str, ...]
     missing_requests: tuple[FinancialStatementRequest, ...]
+    unverified_hashes: tuple[str, ...] = ()
 
 
 def _require_aware(value: datetime, label: str) -> None:
@@ -131,15 +132,24 @@ def hydrate_event_financial_evidence(
         else:
             failed.append(row)
     verified: set[str] = set()
+    missing_source: set[str] = set()
+    unverified: set[str] = set()
     for digest in sorted(by_hash):
+        records = financial_evidence._load_records(digest)  # noqa: SLF001
+        if records is None:
+            missing_source.add(digest)
+            failed.extend(by_hash[digest])
+            continue
         resolved = True
         for row in by_hash[digest]:
-            if financial_evidence._verify_row(row) is None:  # noqa: SLF001
+            if financial_evidence._verify_row(row, records) is None:  # noqa: SLF001
                 failed.append(row)
                 resolved = False
         if resolved:
             verified.add(digest)
-    missing = tuple(digest for digest in sorted(by_hash) if digest not in verified)
+        else:
+            unverified.add(digest)
+    missing = tuple(sorted(missing_source))
     requests = sorted(
         {
             request
@@ -161,6 +171,7 @@ def hydrate_event_financial_evidence(
         verified_hash_count=len(verified),
         missing_hashes=missing,
         missing_requests=tuple(requests),
+        unverified_hashes=tuple(sorted(unverified)),
     )
 
 

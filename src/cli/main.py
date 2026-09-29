@@ -462,6 +462,7 @@ def _run_audit_financial(args: argparse.Namespace) -> int:
         "required_hash_count": summary.required_hash_count,
         "verified_hash_count": summary.verified_hash_count,
         "missing_hashes": list(summary.missing_hashes),
+        "unverified_hashes": list(summary.unverified_hashes),
         "missing_requests": [
             {
                 "corp_code": request.corp_code,
@@ -482,6 +483,7 @@ def _run_audit_financial(args: argparse.Namespace) -> int:
                 "required_hash_count": summary.required_hash_count,
                 "verified_hash_count": summary.verified_hash_count,
                 "missing_hashes": list(summary.missing_hashes),
+                "unverified_hashes": list(summary.unverified_hashes),
                 "report": str(root / relative.as_posix()),
             }
         )

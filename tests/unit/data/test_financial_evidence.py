@@ -225,7 +225,7 @@ def test_basis_isolation(tmp_path: Path) -> None:
 
 
 def test_quarantine_reasons(tmp_path: Path) -> None:
-    """Duplicates, unit breaks, provenance gaps, bad amounts and hint conflicts are excluded."""
+    """Identical source rows verify one value; unit, provenance and amount conflicts stay excluded."""
     good = _record("20240514001363", "assets", "4021576839000")
     dup = _record("20240514001363", "assets", "4021576839000")
     wrong_unit = _record("20240514001364", "assets", "100")
@@ -245,7 +245,52 @@ def test_quarantine_reasons(tmp_path: Path) -> None:
             {"filing_id": "20240514001367", "fact": "assets", "available_at": ELIGIBLE, "value": 999999.0},
         ],
     )
-    assert evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"assets"})) == ()
+    facts = evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"assets"}))
+    assert len(facts) == 1
+    assert facts[0].filing_id == "20240514001363"
+
+
+def test_same_fact_different_amounts_never_selects_a_nearby_account(tmp_path: Path) -> None:
+    first = _record("20240514001363", "equity", "1000000")
+    second = _record("20240514001363", "equity", "1000001")
+    second["account_id"] = "ifrs-full_EquityAttributableToOwnersOfParent"
+    evidence = _setup(
+        tmp_path, [first, second],
+        [{"filing_id": "20240514001363", "fact": "equity", "available_at": ELIGIBLE, "value": 1000000.0}],
+    )
+    facts = evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"equity"}))
+    assert len(facts) == 1
+    assert facts[0].value == Decimal("1000000")
+
+
+def test_repeated_amount_prefers_statement_coordinate(tmp_path: Path) -> None:
+    balance = _record("20240514001363", "cash", "1000")
+    cash_flow = _record("20240514001363", "cash", "1000")
+    cash_flow["sj_div"] = "CF"
+    cash_flow["account_id"] = "dart_CashAndCashEquivalentsAtEndOfPeriodCf"
+    evidence = _setup(
+        tmp_path, [cash_flow, balance],
+        [{"filing_id": "20240514001363", "fact": "cash", "available_at": ELIGIBLE, "value": 1000.0}],
+    )
+    facts = evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"cash"}))
+    assert len(facts) == 1
+    assert "#row=1;statement=BS;" in facts[0].evidence_key
+
+
+def test_net_income_prefers_profit_loss_over_comprehensive_income(tmp_path: Path) -> None:
+    comprehensive = _record("20240514001363", "net_income", "1000")
+    comprehensive["sj_div"] = "CIS"
+    comprehensive["account_id"] = "ifrs-full_ComprehensiveIncome"
+    profit = _record("20240514001363", "net_income", "1000")
+    profit["sj_div"] = "CIS"
+    profit["account_id"] = "ifrs-full_ProfitLoss"
+    evidence = _setup(
+        tmp_path, [comprehensive, profit],
+        [{"filing_id": "20240514001363", "fact": "net_income", "available_at": ELIGIBLE, "value": 1000.0}],
+    )
+    facts = evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"net_income"}))
+    assert len(facts) == 1
+    assert "account=ifrs-full_ProfitLoss;" in facts[0].evidence_key
 
 
 def test_invalid_index_hash_and_corrupt_payload(tmp_path: Path) -> None:

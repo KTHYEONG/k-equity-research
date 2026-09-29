@@ -19,6 +19,26 @@ from src.data.local_paths import checked_local_path
 _EVIDENCE_DIRNAME = "financial_evidence"
 _HEXDIGITS = frozenset("0123456789abcdefABCDEF")
 _CHUNK_SIZE = 1024 * 1024
+_PREFERRED_STATEMENTS: dict[str, tuple[str, ...]] = {
+    "assets": ("BS",),
+    "debt": ("BS",),
+    "equity": ("BS",),
+    "cash": ("BS", "CF"),
+    "sales": ("IS", "CIS"),
+    "gross_profit": ("IS", "CIS"),
+    "operating_profit": ("IS", "CIS"),
+    "net_income": ("IS", "CIS"),
+    "operating_cash_flow": ("CF",),
+    "capex": ("CF",),
+}
+_PREFERRED_ACCOUNTS: dict[str, str] = {
+    "assets": "Assets",
+    "debt": "Liabilities",
+    "equity": "Equity",
+    "cash": "CashAndCashEquivalents",
+    "sales": "Revenue",
+    "net_income": "ProfitLoss",
+}
 
 _FACT_COLUMNS = (
     "dart_corp_code",
@@ -102,11 +122,14 @@ class FinancialEvidence:
             return None
         if not isinstance(records, list) or not isinstance(receipt_doc, dict):
             return None
+        if receipt_doc.get("content_hash") != normalized:
+            return None
         return records
 
-    def _verify_row(self, row: dict[str, Any]) -> VerifiedFinancialFact | None:
+    def _verify_row(self, row: dict[str, Any], records: list[Any] | None = None) -> VerifiedFinancialFact | None:
         source_hash = str(row.get("source_hash") or "")
-        records = self._load_records(source_hash)
+        if records is None:
+            records = self._load_records(source_hash)
         if records is None:
             return None
         filing_id = str(row.get("filing_id") or "")
@@ -115,8 +138,8 @@ class FinancialEvidence:
         fiscal_period = str(row.get("fiscal_period") or "")
         consolidated = bool(row.get("consolidated"))
         matches = [
-            record
-            for record in records
+            (index, record)
+            for index, record in enumerate(records)
             if isinstance(record, dict)
             and record.get("filing_id") == filing_id
             and record.get("corp_code") == corp_code
@@ -124,26 +147,46 @@ class FinancialEvidence:
             and record.get("fiscal_period") == fiscal_period
             and bool(record.get("consolidated")) == consolidated
         ]
-        if len(matches) != 1:
-            return None
-        record = matches[0]
         unit = str(row.get("unit") or "")
-        if not unit or record.get("currency") != unit or record.get("unit") != unit:
-            return None
-        if (
-            not record.get("account_id")
-            or not record.get("sj_div")
-            or record.get("rcept_no") != filing_id
-            or record.get("ord") is None
-        ):
-            return None
-        try:
-            amount = Decimal(str(record.get("thstrm_amount")).replace(",", "").strip())
-        except (InvalidOperation, ValueError):
+        if not unit:
             return None
         hint = row.get("value")
-        if hint is not None and abs(float(amount) - float(hint)) > max(1.0, 1e-6 * abs(float(hint))):
+        candidates: list[tuple[int, dict[str, Any], Decimal]] = []
+        for index, record in matches:
+            if record.get("currency") != unit or record.get("unit") != unit:
+                continue
+            if (
+                not record.get("account_id")
+                or not record.get("sj_div")
+                or record.get("rcept_no") != filing_id
+                or record.get("ord") is None
+            ):
+                continue
+            try:
+                amount = Decimal(str(record.get("thstrm_amount")).replace(",", "").strip())
+            except (InvalidOperation, ValueError):
+                continue
+            if not amount.is_finite() or (hint is not None and float(amount) != float(hint)):
+                continue
+            candidates.append((index, record, amount))
+        if not candidates or len({amount for _, _, amount in candidates}) != 1:
             return None
+        preferred = _PREFERRED_STATEMENTS.get(fact, ())
+
+        def rank(item: tuple[int, dict[str, Any], Decimal]) -> tuple[int, int, int, str, str, int]:
+            index, record, _ = item
+            statement = str(record["sj_div"])
+            account = str(record["account_id"])
+            account_name = account.rsplit("_", 1)[-1]
+            return (
+                preferred.index(statement) if statement in preferred else len(preferred),
+                0 if str(record.get("account_detail") or "-") == "-" else 1,
+                0 if account_name == _PREFERRED_ACCOUNTS.get(fact) else 1,
+                account,
+                str(record["ord"]),
+                index,
+            )
+        record_index, record, amount = min(candidates, key=rank)
         normalized = source_hash.lower()
         return VerifiedFinancialFact(
             corp_code=corp_code,
@@ -155,7 +198,10 @@ class FinancialEvidence:
             unit=unit,
             available_at=row["available_at"],
             source_hash=normalized,
-            evidence_key=f"financial_evidence/{normalized}#{record.get('ord')}",
+            evidence_key=(
+                f"financial_evidence/{normalized}#row={record_index};statement={record['sj_div']};"
+                f"account={record['account_id']};ord={record['ord']}"
+            ),
         )
 
     def facts_asof(
@@ -187,8 +233,13 @@ class FinancialEvidence:
             .to_dicts()
         )
         verified: list[VerifiedFinancialFact] = []
+        record_cache: dict[str, list[Any] | None] = {}
         for row in rows:
-            fact = self._verify_row(row)
+            digest = str(row.get("source_hash") or "")
+            if digest not in record_cache:
+                record_cache[digest] = self._load_records(digest)
+            records = record_cache[digest]
+            fact = self._verify_row(row, records) if records is not None else None
             if fact is not None:
                 verified.append(fact)
         verified.sort(key=lambda item: (item.filing_id, item.fiscal_period, item.fact, item.consolidated))

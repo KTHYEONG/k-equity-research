@@ -268,7 +268,8 @@ def test_missing_and_mismatched_payload_reported_without_fact(tmp_path: Path) ->
     assert summary.event_corp_count == 2
     assert summary.required_hash_count == 6
     assert summary.verified_hash_count == 1
-    assert len(summary.missing_hashes) == 5
+    assert len(summary.missing_hashes) == 4
+    assert len(summary.unverified_hashes) == 1
     assert tuple(sorted(summary.missing_hashes)) == summary.missing_hashes
     assert summary.missing_requests == (
         FinancialStatementRequest(CORP_A, 2024, "11012", "OFS"),
@@ -293,7 +294,8 @@ def test_shared_evidence_hash_is_incomplete_when_one_fact_mismatches(tmp_path: P
     summary = hydrate_event_financial_evidence(catalog, store, financial, root, AS_OF_2024)
     assert summary.required_hash_count == 1
     assert summary.verified_hash_count == 0
-    assert len(summary.missing_hashes) == 1
+    assert summary.missing_hashes == ()
+    assert len(summary.unverified_hashes) == 1
     assert summary.missing_requests == (FinancialStatementRequest(CORP_A, 2024, "11013", "CFS"),)
 
 
