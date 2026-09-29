@@ -284,7 +284,7 @@ def test_collection_wires_parsing_and_event_links(tmp_path: Path) -> None:
     from src.integrations.dart import DartListPage, DartListRow
 
     repo_root = Path(__file__).resolve().parents[3]
-    raw_zip = (repo_root / "data/probe_dart/20240626000207_document.zip").read_bytes()
+    raw_zip = (repo_root / "data/raw/dart/pilot-202406-20260928/doc-20240626000207.zip").read_bytes()
 
     class _Lake:
         def next_session(self, after: date) -> date | None:

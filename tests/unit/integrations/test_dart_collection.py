@@ -279,15 +279,15 @@ def test_collected_correction_links_to_unique_original(tmp_path: Path) -> None:
     root = tmp_path / "data"
     catalog = Catalog(root / "catalog.sqlite")
     store = EventStore(catalog)
-    probe = Path("data/probe_dart")
+    probe = Path("data/raw/dart/pilot-202406-20260928")
     original = DartListRow(original_no, "01386916", "361610", "Y", FORM, date(2024, 6, 26), "정")
     correction = DartListRow(
         correction_no, "01386916", "361610", "Y", "[기재정정]" + FORM, date(2024, 6, 26), "정"
     )
     pages = {1: _page(1, [original]), 2: _page(2, [correction])}
     zips = {
-        original_no: (probe / f"{original_no}_document.zip").read_bytes(),
-        correction_no: (probe / f"{correction_no}_document.zip").read_bytes(),
+        original_no: (probe / f"doc-{original_no}.zip").read_bytes(),
+        correction_no: (probe / f"doc-{correction_no}.zip").read_bytes(),
     }
     summary = collect_buyback_window(
         _FakeClient(pages, zips),  # type: ignore[arg-type]

@@ -19,7 +19,7 @@ from src.data.catalog import FilingVersion
 KST = ZoneInfo("Asia/Seoul")
 ORIG = "20240626000207"
 CORR = "20240626000369"
-PROBE = Path("data/probe_dart")
+PROBE = Path("data/raw/dart/pilot-202406-20260928")
 
 
 def _filing(rcept_no: str, raw: bytes, receipt_day: date = date(2024, 6, 26)) -> FilingVersion:
@@ -91,8 +91,8 @@ def _zip_with_names(entries: dict[str, bytes]) -> bytes:
 
 def test_original_and_correction_keep_own_hashes_and_limits() -> None:
     """Distinct document hashes and BUY_OSTK_LMT values stay attached to their receipts."""
-    raw_orig = (PROBE / f"{ORIG}_document.zip").read_bytes()
-    raw_corr = (PROBE / f"{CORR}_document.zip").read_bytes()
+    raw_orig = (PROBE / f"doc-{ORIG}.zip").read_bytes()
+    raw_corr = (PROBE / f"doc-{CORR}.zip").read_bytes()
     parsed_orig = parse_buyback_document(_filing(ORIG, raw_orig), raw_orig, DocumentLimits())
     parsed_corr = parse_buyback_document(_filing(CORR, raw_corr), raw_corr, DocumentLimits())
     assert parsed_orig.document_hash == hashlib.sha256(raw_orig).hexdigest()
@@ -113,7 +113,7 @@ def test_original_and_correction_keep_own_hashes_and_limits() -> None:
 
 
 def test_correction_reads_first_submission_date_from_document() -> None:
-    raw = (PROBE / f"{CORR}_document.zip").read_bytes()
+    raw = (PROBE / f"doc-{CORR}.zip").read_bytes()
     filing = replace(_filing(CORR, raw, date(2024, 6, 28)), correction_flag=True)
     parsed = parse_buyback_document(filing, raw, DocumentLimits())
     assert parsed.first_submission_date == date(2024, 6, 26)
@@ -165,7 +165,7 @@ def test_dash_value_never_becomes_verified_zero() -> None:
 
 def test_date_coordinates_preserve_iso_and_evidence() -> None:
     """AUNIT planned dates keep ISO values with receipt-specific coordinates."""
-    raw = (PROBE / f"{ORIG}_document.zip").read_bytes()
+    raw = (PROBE / f"doc-{ORIG}.zip").read_bytes()
     parsed = parse_buyback_document(_filing(ORIG, raw), raw, DocumentLimits())
     facts = _fact_map(parsed)
     assert facts["ACQ_BGN"].value_text == "2024-06-27"
@@ -195,7 +195,7 @@ def test_duplicate_amount_codes_stay_unverified() -> None:
 
 def test_unsafe_archives_rejected_before_extraction() -> None:
     """Traversal, ambiguous members and expansion over budget fail closed."""
-    raw = (PROBE / f"{ORIG}_document.zip").read_bytes()
+    raw = (PROBE / f"doc-{ORIG}.zip").read_bytes()
     filing = _filing(ORIG, raw)
     traversal = _zip_with_names({"../evil.xml": b"<DOCUMENT/>"})
     with pytest.raises(ValueError, match="unsafe"):
@@ -296,7 +296,7 @@ def test_archive_guards_reject_malformed_inputs() -> None:
     garbage = b"not-a-zip-at-all"
     with pytest.raises(ValueError, match="malformed receipt archive"):
         parse_buyback_document(filing, garbage, DocumentLimits())
-    real = (PROBE / f"{ORIG}_document.zip").read_bytes()
+    real = (PROBE / f"doc-{ORIG}.zip").read_bytes()
     with pytest.raises(ValueError, match="member budget"):
         parse_buyback_document(filing, real, DocumentLimits(max_members=0))
     buffer = io.BytesIO()

@@ -23,7 +23,7 @@ from src.integrations.krx_index import KrxIndexClient, KrxSourceError, parse_ind
 KST = ZoneInfo("Asia/Seoul")
 SESSION = date(2024, 6, 27)
 API_KEY = "SECRET-KEY-123"
-PROBE = Path(__file__).resolve().parents[3] / "data" / "probe_krx"
+PROBE = Path(__file__).resolve().parents[3] / "data/raw/krx/pilot-2024h1-20260928"
 
 
 def _row(name: str, open_price: str, close_price: str, day: str = "20240627", cls: str = "KOSPI") -> dict[str, str]:
@@ -206,7 +206,7 @@ def test_fetch_day_retries_then_recovers_or_exhausts() -> None:
 
 def test_credential_exclusion_from_cache_and_errors() -> None:
     """The API key never reaches cached bytes, catalog metadata or error text."""
-    probe = (PROBE / "kospi_20240627.json").read_bytes()
+    probe = (PROBE / "KOSPI-20240627.json").read_bytes()
 
     def _ok(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=probe)
@@ -228,8 +228,8 @@ def test_credential_exclusion_from_cache_and_errors() -> None:
 def test_project_local_replay_without_api_access(tmp_path: Path) -> None:
     """Cached raw responses replay the same bar and hash with no live lookup."""
     catalog = Catalog(tmp_path / "data" / "catalog.sqlite")
-    kospi_probe = (PROBE / "kospi_20240627.json").read_bytes()
-    kosdaq_probe = (PROBE / "kosdaq_20240627.json").read_bytes()
+    kospi_probe = (PROBE / "KOSPI-20240627.json").read_bytes()
+    kosdaq_probe = (PROBE / "KOSDAQ-20240627.json").read_bytes()
 
     class _Client:
         def fetch_day(self, market: str, session: date) -> bytes:
