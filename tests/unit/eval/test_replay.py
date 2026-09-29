@@ -29,6 +29,7 @@ from src.eval.replay import (
     report_to_dict,
 )
 from src.research.context import build_research_context
+from src.research.analogue_proof import AnalogueProof
 from src.research.event_study import StudyPolicy
 from src.eval.replay import _detect_future_leak as detect_future_leak
 
@@ -260,6 +261,17 @@ def test_changed_source_hash_fails_before_memo(tmp_path: Path) -> None:
     target.unlink()
     missing = replay_case(_case(data_root, hashes=(dart_hash,)), data_root)
     assert missing.status == "SOURCE_CHANGED"
+
+
+def test_replay_rejects_proof_without_analogue_citation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay refuses a proof that the generated memo cannot cite."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    invalid = AnalogueProof(payload=b"invalid proof", sha256="0" * 64, input_hashes=())
+    monkeypatch.setattr("src.eval.replay.build_analogue_proof", lambda context: invalid)
+    result = replay_case(_case(data_root), data_root)
+    assert result.status == "SOURCE_CHANGED"
 
 
 def test_case_before_correction_keeps_earlier_facts(tmp_path: Path) -> None:

@@ -19,10 +19,11 @@ from src.data.imports import ImportManifest, ImportPart
 from src.data.index_store import IndexStore, load_index_manifest
 from src.data.local_lake import LocalLake
 from src.data.local_paths import checked_local_path
+from src.research.analogue_proof import build_analogue_proof
 from src.research.context import ResearchContext, ResearchUnavailable, build_research_context
 from src.research.event_study import StudyPolicy
 from src.research.memo import build_baseline_memo
-from src.research.publication import validate_memo_evidence
+from src.research.publication import proof_reference, validate_memo_evidence
 
 CODE_REVISION = "eval-replay-v1"
 _HOLDOUT_YEAR = 2026
@@ -198,9 +199,17 @@ def _replay(
         return _empty_result(case.case_id, "REFUSED", started), None
     if case.snapshot_id not in context.snapshot_ids:
         return _empty_result(case.case_id, "SOURCE_CHANGED", started), None
-    baseline = build_baseline_memo(context)
     try:
-        validate_memo_evidence(data_root, baseline)
+        proof = build_analogue_proof(context)
+        proof_ref = (
+            proof_reference(data_root / "reports" / context.event.event_id / f"eval-{case.case_id}", proof)
+            if proof is not None
+            else None
+        )
+        baseline = build_baseline_memo(context, analogue_ref=proof_ref)
+        if proof is not None and not any(ref.id == "tool-analogues" for ref in baseline.evidence):
+            return _empty_result(case.case_id, "SOURCE_CHANGED", started), None
+        validate_memo_evidence(data_root, baseline, staged_proof=proof)
     except ValueError:
         return _empty_result(case.case_id, "SOURCE_CHANGED", started), None
     if model is not None and agent_policy is not None:

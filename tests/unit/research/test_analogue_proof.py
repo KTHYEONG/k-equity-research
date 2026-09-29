@@ -137,7 +137,10 @@ def test_canonical_replay_is_byte_identical() -> None:
     assert second_proof is not None
     assert first_proof.payload == second_proof.payload
     assert first_proof.sha256 == second_proof.sha256
-    assert json.loads(first_proof.payload.decode("utf-8"))["quantiles"]["median"] == "0.045"
+    document = json.loads(first_proof.payload.decode("utf-8"))
+    assert document["quantiles"]["median"] == "0.045"
+    assert {"local_path": f"krx/manifests/{_MANIFEST}.json", "sha256": _MANIFEST} in document["inputs"]
+    assert _MANIFEST in first_proof.input_hashes
 
 
 def test_exact_decimal_distribution_reproduces_memo_values() -> None:

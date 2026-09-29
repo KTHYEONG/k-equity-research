@@ -83,11 +83,16 @@ def build_analogue_proof(context: ResearchContext) -> AnalogueProof | None:
     if not _is_hex64(manifest_hash):
         raise AnalogueEvidenceUnavailable("invalid index manifest identity")
     required: set[str] = set(comparables.selection_source_hashes)
+    required.add(manifest_hash)
     for obs in observations:
         required.update(obs.source_hashes)
     inputs: list[dict[str, str]] = []
     for digest in sorted(required):
-        path = context.artifact_paths.get(digest)
+        path = (
+            PurePosixPath(f"krx/manifests/{manifest_hash}.json")
+            if digest == manifest_hash
+            else context.artifact_paths.get(digest)
+        )
         if not _is_hex64(digest) or path is None or not _safe_path(path):
             raise AnalogueEvidenceUnavailable(f"missing local path for input {digest}")
         inputs.append({"local_path": path.as_posix(), "sha256": digest.lower()})
