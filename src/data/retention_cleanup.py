@@ -335,6 +335,14 @@ def _collect(
     keep_hashes |= _pinned_index_hashes(root, catalog, lake)
     keep_hashes |= _filing_hashes(catalog)
     _check_event_links(catalog)
+    for row in catalog._conn.execute(  # noqa: SLF001
+        "SELECT sha256, local_path FROM raw_artifact WHERE source='dart' AND endpoint='financial-document'"
+    ).fetchall():
+        digest = str(row["sha256"]).lower()
+        target = checked_local_path(root, PurePosixPath(str(row["local_path"])))
+        if target.is_symlink() or not target.is_file() or _sha256_file(target) != digest:
+            raise ValueError("missing or changed financial document artifact")
+        keep_hashes.add(digest)
     for row in catalog._conn.execute("SELECT viewer_hash FROM buyback_viewer_parent").fetchall():  # noqa: SLF001
         digest = str(row["viewer_hash"])
         relative = catalog.get_artifact_path(digest)

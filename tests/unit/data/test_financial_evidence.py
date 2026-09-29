@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
@@ -291,6 +291,58 @@ def test_net_income_prefers_profit_loss_over_comprehensive_income(tmp_path: Path
     facts = evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"net_income"}))
     assert len(facts) == 1
     assert "account=ifrs-full_ProfitLoss;" in facts[0].evidence_key
+
+
+def test_legacy_krw_label_uses_explicit_dart_foreign_currency(tmp_path: Path) -> None:
+    foreign = _record("20240514001363", "assets", "1000")
+    foreign["source_kind"] = "opendart_standard"
+    foreign["currency"] = "USD"
+    evidence = _setup(
+        tmp_path, [foreign],
+        [{"filing_id": "20240514001363", "fact": "assets", "available_at": ELIGIBLE, "value": 1000.0}],
+    )
+    facts = evidence.facts_asof("01386916", datetime(2024, 6, 1, tzinfo=KST), frozenset({"assets"}))
+    assert len(facts) == 1
+    assert facts[0].unit == "USD"
+    assert facts[0].value == Decimal("1000")
+
+
+def test_document_fact_requires_local_hash_verified_zip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data.dart_statements.document_statements import (
+        PARSER_VERSION, DocumentParseResult, PeriodBasis, StatementFact, VerifiedStatements,
+    )
+
+    raw = b"official filing archive"
+    digest = hashlib.sha256(raw).hexdigest()
+    record = _record("20240514001363", "assets", "1000")
+    record.update({
+        "source_kind": "document_verified", "parser_version": PARSER_VERSION,
+        "raw_document_hash": digest, "reprt_code": "11013", "biz_year": "2024",
+        "period_basis": "point_in_time", "checks": ["bs_balance"],
+    })
+    evidence = _setup(
+        tmp_path, [record],
+        [{"filing_id": "20240514001363", "fact": "assets", "available_at": ELIGIBLE, "value": 1000.0}],
+    )
+    target = tmp_path / "data/raw/dart/financial-document" / f"{digest}.zip"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(raw)
+    parsed = DocumentParseResult(
+        statements=VerifiedStatements(
+            consolidated=True, period_end=date(2024, 3, 31), report_kind="q1",
+            unit_multipliers={"BS": 1},
+            facts=(StatementFact("assets", 1000, PeriodBasis.POINT_IN_TIME, "자산총계"),),
+            checks=("bs_balance",),
+        ), diagnostics=(),
+    )
+    monkeypatch.setattr("src.data.financial_evidence.parse_filing_document", lambda *_args, **_kwargs: parsed)
+    as_of = datetime(2024, 6, 1, tzinfo=KST)
+    facts = evidence.facts_asof("01386916", as_of, frozenset({"assets"}))
+    assert len(facts) == 1
+    assert facts[0].value == Decimal("1000")
+    assert f"document={digest}" in facts[0].evidence_key
+    target.write_bytes(b"tampered")
+    assert evidence.facts_asof("01386916", as_of, frozenset({"assets"})) == ()
 
 
 def test_invalid_index_hash_and_corrupt_payload(tmp_path: Path) -> None:

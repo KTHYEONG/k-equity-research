@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
+from src.data.dart_statements.document_statements import PARSER_VERSION, DocumentParseResult, parse_filing_document
 from src.data.local_lake import FACTS_DATASET_ID, LocalLake
 from src.data.local_paths import checked_local_path
 
@@ -126,7 +127,80 @@ class FinancialEvidence:
             return None
         return records
 
-    def _verify_row(self, row: dict[str, Any], records: list[Any] | None = None) -> VerifiedFinancialFact | None:
+    def _load_document(self, record: dict[str, Any], cache: dict[str, DocumentParseResult | None]) -> DocumentParseResult | None:
+        digest = str(record.get("raw_document_hash") or "").lower()
+        if not _is_hex64(digest) or record.get("parser_version") != PARSER_VERSION:
+            return None
+        if digest in cache:
+            return cache[digest]
+        try:
+            path = checked_local_path(self._data_root, PurePosixPath("raw/dart/financial-document") / f"{digest}.zip")
+            if path.is_symlink() or not path.is_file() or _sha256_of(path) != digest:
+                return None
+            result = parse_filing_document(
+                path.read_bytes(), reprt_code=str(record["reprt_code"]), biz_year=str(record["biz_year"])
+            )
+        except (KeyError, OSError, ValueError):
+            return None
+        cache[digest] = result
+        return result
+
+    def _verify_document_row(
+        self, row: dict[str, Any], matches: list[tuple[int, dict[str, Any]]],
+        cache: dict[str, DocumentParseResult | None],
+    ) -> VerifiedFinancialFact | None:
+        if not matches:
+            return None
+        _, record = matches[0]
+        if record.get("source_kind") != "document_verified" or record.get("unit") != "KRW":
+            return None
+        if row.get("unit") != "KRW" or record.get("rcept_no") != row.get("filing_id"):
+            return None
+        parsed = self._load_document(record, cache)
+        statements = parsed.statements if parsed is not None else None
+        if statements is None or statements.consolidated != bool(row.get("consolidated")):
+            return None
+        candidates = []
+        for index, candidate in matches:
+            checks = candidate.get("checks")
+            if (
+                candidate.get("source_kind") != "document_verified"
+                or candidate.get("raw_document_hash") != record.get("raw_document_hash")
+                or candidate.get("parser_version") != PARSER_VERSION
+                or candidate.get("unit") != "KRW"
+                or not isinstance(checks, list)
+                or "bs_balance" not in checks
+                or set(checks) != set(statements.checks)
+            ):
+                return None
+            for item in statements.facts:
+                if (
+                    item.fact == row.get("fact")
+                    and item.basis.value == candidate.get("period_basis")
+                    and float(item.value) == row.get("value")
+                    and float(item.value) == candidate.get("value")
+                ):
+                    candidates.append((index, candidate, item))  # noqa: PERF401 - retain per-record source checks above
+        if not candidates or len({item.value for _, _, item in candidates}) != 1:
+            return None
+        basis_order = {"point_in_time": 0, "quarter": 1, "cumulative": 2, "annual": 3}
+        index, _, item = min(candidates, key=lambda entry: (basis_order.get(entry[2].basis.value, 4), entry[0]))
+        digest = str(record["raw_document_hash"]).lower()
+        return VerifiedFinancialFact(
+            corp_code=str(row["dart_corp_code"]), filing_id=str(row["filing_id"]),
+            fact=item.fact, fiscal_period=str(row["fiscal_period"]),
+            consolidated=statements.consolidated, value=Decimal(item.value), unit="KRW",
+            available_at=row["available_at"], source_hash=str(row["source_hash"]).lower(),
+            evidence_key=(
+                f"financial_evidence/{row['source_hash']}#row={index};document={digest};"
+                f"basis={item.basis.value};label={item.label}"
+            ),
+        )
+
+    def _verify_row(
+        self, row: dict[str, Any], records: list[Any] | None = None,
+        document_cache: dict[str, DocumentParseResult | None] | None = None,
+    ) -> VerifiedFinancialFact | None:
         source_hash = str(row.get("source_hash") or "")
         if records is None:
             records = self._load_records(source_hash)
@@ -147,13 +221,25 @@ class FinancialEvidence:
             and record.get("fiscal_period") == fiscal_period
             and bool(record.get("consolidated")) == consolidated
         ]
+        if matches and any(record.get("source_kind") == "document_verified" for _, record in matches):
+            return self._verify_document_row(row, matches, document_cache if document_cache is not None else {})
         unit = str(row.get("unit") or "")
         if not unit:
             return None
+        currencies = {record.get("currency") for _, record in matches}
+        if len(currencies) != 1:
+            return None
+        source_currency = next(iter(currencies)) if currencies else None
+        legacy_foreign_unit = (
+            unit == "KRW"
+            and source_currency in {"USD", "JPY", "HKD"}
+            and all(record.get("source_kind") == "opendart_standard" and record.get("unit") == "KRW" for _, record in matches)
+        )
+        effective_unit = str(source_currency) if legacy_foreign_unit else unit
         hint = row.get("value")
         candidates: list[tuple[int, dict[str, Any], Decimal]] = []
         for index, record in matches:
-            if record.get("currency") != unit or record.get("unit") != unit:
+            if record.get("currency") != effective_unit or record.get("unit") != unit:
                 continue
             if (
                 not record.get("account_id")
@@ -195,12 +281,12 @@ class FinancialEvidence:
             fiscal_period=fiscal_period,
             consolidated=consolidated,
             value=amount,
-            unit=unit,
+            unit=effective_unit,
             available_at=row["available_at"],
             source_hash=normalized,
             evidence_key=(
                 f"financial_evidence/{normalized}#row={record_index};statement={record['sj_div']};"
-                f"account={record['account_id']};ord={record['ord']}"
+                f"account={record['account_id']};ord={record['ord']};currency={effective_unit}"
             ),
         )
 
@@ -234,12 +320,13 @@ class FinancialEvidence:
         )
         verified: list[VerifiedFinancialFact] = []
         record_cache: dict[str, list[Any] | None] = {}
+        document_cache: dict[str, DocumentParseResult | None] = {}
         for row in rows:
             digest = str(row.get("source_hash") or "")
             if digest not in record_cache:
                 record_cache[digest] = self._load_records(digest)
             records = record_cache[digest]
-            fact = self._verify_row(row, records) if records is not None else None
+            fact = self._verify_row(row, records, document_cache) if records is not None else None
             if fact is not None:
                 verified.append(fact)
         verified.sort(key=lambda item: (item.filing_id, item.fiscal_period, item.fact, item.consolidated))

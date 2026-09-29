@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from src.data.catalog import Catalog
+from src.data.dart_statements.document_statements import DocumentParseResult
 from src.data.event_store import EventStore
 from src.data.financial_evidence import _FACT_COLUMNS, FinancialEvidence
 from src.data.local_lake import FACTS_DATASET_ID
@@ -134,6 +135,7 @@ def hydrate_event_financial_evidence(
     verified: set[str] = set()
     missing_source: set[str] = set()
     unverified: set[str] = set()
+    document_cache: dict[str, DocumentParseResult | None] = {}
     for digest in sorted(by_hash):
         records = financial_evidence._load_records(digest)  # noqa: SLF001
         if records is None:
@@ -142,7 +144,7 @@ def hydrate_event_financial_evidence(
             continue
         resolved = True
         for row in by_hash[digest]:
-            if financial_evidence._verify_row(row, records) is None:  # noqa: SLF001
+            if financial_evidence._verify_row(row, records, document_cache) is None:  # noqa: SLF001
                 failed.append(row)
                 resolved = False
         if resolved:

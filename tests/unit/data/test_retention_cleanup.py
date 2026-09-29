@@ -462,6 +462,22 @@ def test_missing_active_evidence_blocks(tmp_path: Path) -> None:
         plan_local_retirement(rig["root"], rig["catalog"], rig["store"])  # type: ignore[arg-type]
 
 
+def test_reused_financial_documents_stay_pinned_and_hash_checked(tmp_path: Path) -> None:
+    rig = _rig(tmp_path, pilot=False)
+    root = rig["root"]
+    catalog = rig["catalog"]
+    path = root / "raw/dart/financial-document/doc.zip"  # type: ignore[operator]
+    _register(
+        catalog, "dart", "financial-document", "20240514001363", SNAP_OLD,
+        b"financial document", "raw/dart/financial-document/doc.zip",
+    )
+    plan = plan_local_retirement(root, catalog, rig["store"])  # type: ignore[arg-type]
+    assert path not in plan.obsolete_raw_artifacts
+    path.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="changed financial document artifact"):
+        plan_local_retirement(root, catalog, rig["store"])  # type: ignore[arg-type]
+
+
 def test_gap_and_drift_block_planning(tmp_path: Path) -> None:
     """Financial gaps and source drift abort the plan before any deletion."""
     rig = _rig(tmp_path / "p1", pilot=False)
