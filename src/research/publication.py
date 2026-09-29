@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -149,6 +150,14 @@ def publish_research_run(
         raise ValueError("run manifest must be a mapping")
     validate_memo_evidence(data_root, memo, staged_proof=proof)
     relative_dir = PurePosixPath("reports") / memo.event_id / run_id
+    analogue_refs = [ref for ref in memo.evidence if ref.id == "tool-analogues"]
+    expected_proof_path = relative_dir / _PROOF_FILENAME
+    if proof is None and analogue_refs:
+        raise ValueError("analogue citation requires proof bytes")
+    if proof is not None and (
+        len(analogue_refs) != 1 or analogue_refs[0].local_relative_path != expected_proof_path
+    ):
+        raise ValueError("analogue citation must name the published proof")
     run_dir = checked_local_path(data_root, relative_dir)
     memo_payload = (json.dumps(memo_to_dict(memo), sort_keys=True, indent=2) + "\n").encode("utf-8")
     markdown_payload = render_markdown(memo).encode("utf-8")
@@ -171,11 +180,14 @@ def publish_research_run(
         return PublishedResearchRun(run_id, memo, proof, manifest_hash, relative_dir)
     if record is not None:
         raise ValueError(f"conflicting research run: {run_id}")
-    staging = run_dir.parent / (run_dir.name + ".staging")
-    staging.mkdir(parents=True, exist_ok=True)
-    for name, payload in wanted.items():
-        (staging / name).write_bytes(payload)
-    os.replace(staging, run_dir)
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{run_id}-", dir=run_dir.parent) as staging_name:
+        staging = Path(staging_name)
+        for name, payload in wanted.items():
+            (staging / name).write_bytes(payload)
+        if run_dir.exists():  # pragma: no cover - concurrent publisher race
+            raise ValueError(f"conflicting research run: {run_id}")
+        os.replace(staging, run_dir)
     catalog.register_research_run(run_id, manifest_hash, "COMPLETE", relative_dir / "manifest.json")
     return PublishedResearchRun(run_id, memo, proof, manifest_hash, relative_dir)
 

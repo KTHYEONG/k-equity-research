@@ -218,6 +218,41 @@ def test_publish_writes_proof_sibling_and_registers(tmp_path: Path) -> None:
     validate_memo_evidence(data_root, memo)
 
 
+def test_publish_rejects_proof_citation_outside_run_directory(tmp_path: Path) -> None:
+    """Virtual proof bytes cannot validate a citation that will never be published at its claimed path."""
+    data_root = tmp_path / "data"
+    digest = _register(data_root, "raw/krx/day.json", b"index-bytes")
+    proof = _proof_with_inputs([("raw/krx/day.json", digest)])
+    memo = _proof_memo(proof, "reports/evt-1/other-run/analogue-proof.json")
+    with pytest.raises(ValueError, match="must name the published proof"):
+        publish_research_run(data_root, "run-1", memo, proof, {"run_id": "run-1"})
+    assert not (data_root / "reports/evt-1/run-1").exists()
+
+
+def test_publish_rejects_analogue_citation_without_proof_bytes(tmp_path: Path) -> None:
+    """An existing proof file cannot stand in for the proof payload of a new run."""
+    data_root = tmp_path / "data"
+    proof = _staged_proof([])
+    relative = "reports/evt-1/run-1/analogue-proof.json"
+    path = data_root / relative
+    path.parent.mkdir(parents=True)
+    path.write_bytes(proof.payload)
+    with pytest.raises(ValueError, match="requires proof bytes"):
+        publish_research_run(data_root, "run-1", _proof_memo(proof, relative), None, {"run_id": "run-1"})
+
+
+def test_publish_does_not_reuse_stale_staging_directory(tmp_path: Path) -> None:
+    """A leftover staging directory cannot inject files into a new registered run."""
+    data_root = tmp_path / "data"
+    Catalog(data_root / "catalog.sqlite")
+    stale = data_root / "reports/evt-1/run-1.staging"
+    stale.mkdir(parents=True)
+    (stale / "unrelated.json").write_text('{"sha256":"aa"}', encoding="utf-8")
+    publish_research_run(data_root, "run-1", _memo(), None, {"run_id": "run-1"})
+    assert not (data_root / "reports/evt-1/run-1/unrelated.json").exists()
+    assert (stale / "unrelated.json").is_file()
+
+
 def test_publish_without_proof_omits_proof_file(tmp_path: Path) -> None:
     """A run without reportable quantiles publishes no proof file or analogue claim."""
     data_root = tmp_path / "data"
