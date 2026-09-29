@@ -13,7 +13,7 @@
 
 ## 3. Project Toolchain & Verification
 Verify code changes against the project's native toolchains before concluding tasks:
-- **Quality Gate:** `uv run python tools/agent_skills/lean_check.py`
+- **Quality Gate:** `uv run python tools/verify.py`
 - **Test Runner:** `uv run pytest`
 - **Git Commits:** Run the project's `commit` skill.
 

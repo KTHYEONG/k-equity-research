@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smart Selective Lean Check: Fast, token-efficient mechanical audit gate."""
+"""Fast, token-efficient local verification gate: Lint, Type, Tests & 100% Diff-Coverage."""
 
 from __future__ import annotations
 
@@ -136,7 +136,7 @@ def _check_scaffolding_leaks(py_files: list[str]) -> list[JsonDiag]:
 # ---------------------------------------------------------------------------
 
 
-def _find_test_files(py_files: list[str], spec_path: str | None = None) -> tuple[list[str], list[str]]:
+def _find_test_files(py_files: list[str]) -> tuple[list[str], list[str]]:
     """Find direct unit tests corresponding to modified source files.
 
     Returns ``(mapped, unmapped)``: files explicitly passed through are kept,
@@ -183,130 +183,8 @@ def _find_test_files(py_files: list[str], spec_path: str | None = None) -> tuple
         if not found:
             unmapped.append(sf)
 
-    # 2. Spec test suites if provided
-    if spec_path and os.path.isfile(spec_path):
-        with contextlib.suppress(OSError):
-            with open(spec_path, encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            matches = re.findall(
-                r"(?m)^##\s+(?:Test\s+Suite|Invariant\s+Scenarios):\s*`?([^\n`]+)`?",
-                content,
-            )
-            for m in matches:
-                tf = m.strip().strip("`").strip()
-                if os.path.isfile(tf) and tf not in test_files:
-                    test_files.append(tf)
 
     return sorted(dict.fromkeys(test_files)), sorted(dict.fromkeys(unmapped))
-
-
-def _check_pre_impl_spec(spec_path: str) -> tuple[int, list[JsonDiag]]:
-    """Validate spec blueprint paths, targets, caller files, and anchors before implementation."""
-    diags: list[JsonDiag] = []
-    if not os.path.isfile(spec_path):
-        return 1, [
-            {
-                "file": spec_path,
-                "line": 0,
-                "error": f"Spec file not found: {spec_path}",
-                "fix_hint": "Check spec file path",
-            }
-        ]
-
-    try:
-        with open(spec_path, encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-    except OSError as e:
-        return 1, [
-            {
-                "file": spec_path,
-                "line": 0,
-                "error": f"Cannot read spec file: {e}",
-                "fix_hint": "Check file permissions",
-            }
-        ]
-
-    current_caller: str | None = None
-    target_found = False
-
-    for idx, line in enumerate(lines, start=1):
-        stripped = line.strip()
-
-        # Check Target
-        m_target = re.match(r"^##\s+Target:\s*`?([^\n`]+)`?", stripped)
-        if m_target:
-            target_file = m_target.group(1).strip().strip("`").strip()
-            target_found = True
-            parent = os.path.dirname(target_file)
-            if parent and not os.path.isdir(parent):
-                diags.append(
-                    {
-                        "file": spec_path,
-                        "line": idx,
-                        "error": f"Target parent directory does not exist: '{parent}' for target '{target_file}'",
-                        "fix_hint": f"Create directory {parent} or fix path in spec",
-                    }
-                )
-
-        # Check Wiring caller file
-        m_wiring = re.match(r"^##\s+Wiring:\s*`?([^\n`]+)`?", stripped)
-        if m_wiring:
-            current_caller = m_wiring.group(1).strip().strip("`").strip()
-            if not os.path.isfile(current_caller):
-                diags.append(
-                    {
-                        "file": spec_path,
-                        "line": idx,
-                        "error": f"Wiring caller file does not exist: '{current_caller}'",
-                        "fix_hint": f"Verify caller file path in {spec_path}",
-                    }
-                )
-
-        # Check Anchor in caller file
-        m_anchor = re.match(r"^-\s*(?:Anchor|anchor):\s*`?([^\n`]+)`?", stripped)
-        if m_anchor and current_caller and os.path.isfile(current_caller):
-            anchor = m_anchor.group(1).strip().strip("`").strip()
-            try:
-                with open(current_caller, encoding="utf-8", errors="ignore") as cf:
-                    caller_content = cf.read()
-                if anchor not in caller_content:
-                    diags.append(
-                        {
-                            "file": current_caller,
-                            "line": 0,
-                            "error": f"Wiring anchor '{anchor}' not found in caller file '{current_caller}'",
-                            "fix_hint": f"Ensure anchor '{anchor}' matches an existing symbol or line in {current_caller}",
-                        }
-                    )
-            except OSError:
-                pass
-
-        # Check Invariant Scenarios / Test Suite test file
-        m_test = re.match(r"^##\s+(?:Invariant\s+Scenarios|Test\s+Suite):\s*`?([^\n`]+)`?", stripped)
-        if m_test:
-            test_file = m_test.group(1).strip().strip("`").strip()
-            parent = os.path.dirname(test_file)
-            if parent and not os.path.isdir(parent):
-                diags.append(
-                    {
-                        "file": spec_path,
-                        "line": idx,
-                        "error": f"Test suite directory does not exist: '{parent}' for '{test_file}'",
-                        "fix_hint": f"Create directory {parent} or fix path in spec",
-                    }
-                )
-
-    if not target_found:
-        diags.append(
-            {
-                "file": spec_path,
-                "line": 0,
-                "error": "Spec missing mandatory '## Target: <path>' section",
-                "fix_hint": "Add '## Target: <relative_path>' section to spec",
-            }
-        )
-
-    return (1 if diags else 0), diags
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +282,8 @@ def _check_diff_coverage(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Selective Lean Check: Tier 1 Mechanical Gate.")
+    parser = argparse.ArgumentParser(description="Fast, token-efficient local verification gate.")
     parser.add_argument("--files", nargs="*", default=[], help="Explicit files to check")
-    parser.add_argument("--spec", default=None, help="Path to markdown/JSON spec file")
     parser.add_argument("--fast", action="store_true", help="Run static checks only (scaffolding, ruff, mypy)")
     parser.add_argument("--skip-lint", action="store_true", help="Skip Ruff linting")
     parser.add_argument("--skip-mypy", action="store_true", help="Skip Mypy static check")
@@ -425,31 +302,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 0. Pre-implementation Spec Blueprint Gate
-    if args.pre_impl:
-        if not args.spec:
-            _exit_with_diags(
-                "pre-impl",
-                "FAIL | --pre-impl requires --spec <spec_file>",
-                [
-                    {
-                        "file": "",
-                        "line": 0,
-                        "error": "--pre-impl requires --spec argument",
-                        "fix_hint": "Pass --spec docs/specs/<feature>_spec.md",
-                    }
-                ],
-            )
-        code, diags = _check_pre_impl_spec(args.spec)
-        if code != 0:
-            _exit_with_diags(
-                "pre-impl",
-                f"FAIL | Pre-impl spec validation failed ({len(diags)} error(s))",
-                diags,
-            )
-        print("PASS | Spec blueprint paths and wiring anchors verified (pre-impl)")
-        print(_emit_json("PASS", "pre-impl", []), file=sys.stderr)
-        return
 
     # 1. File discovery from git if not explicitly passed
     if not args.files:
@@ -519,7 +371,7 @@ def main() -> None:
         return
 
     # 4. Direct Test Discovery
-    test_files, unmapped = _find_test_files(py_files, spec_path=args.spec)
+    test_files, unmapped = _find_test_files(py_files)
     if not test_files:
         if unmapped:
             diags = [
@@ -554,7 +406,7 @@ def main() -> None:
         xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
 
     src_files = [f for f in py_files if f.startswith("src/")]
-    cov_json_path = "tmp/lean_check_coverage.json"
+    cov_json_path = "tmp/verify_coverage.json"
     cov_args: list[str] = []
 
     if src_files and not args.no_cov:
