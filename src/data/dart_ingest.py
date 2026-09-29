@@ -63,6 +63,9 @@ def _normalize_title(value: str) -> str:
 
 
 def _is_buyback_candidate(report_name: str) -> bool:
+    """Select buyback decision bodies; attachment-only corrections have no decision ZIP."""
+    if re.match(r"^\s*\[첨부정정\]", report_name):
+        return False
     return _normalize_title(report_name) == _EXACT_FORM
 
 

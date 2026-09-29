@@ -143,6 +143,10 @@ def test_all_category_list_uses_issuer_filter_without_disclosure_type() -> None:
     assert "corp_code" not in requests[1].url.params
     assert "pblntf_ty" not in requests[1].url.params
 
+    filtered_page = client.list_reports(date(2024, 6, 27), date(2024, 6, 28), 1, pblntf_ty="E")
+    assert len(filtered_page.rows) == 2
+    assert requests[2].url.params["pblntf_ty"] == "E"
+
 
 def test_issuer_list_rejects_provider_identity_mismatch() -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -174,6 +178,8 @@ def test_issuer_list_rejects_provider_identity_mismatch() -> None:
     assert error.value.status == "SCHEMA"
     with pytest.raises(ValueError, match="8-digit"):
         client.list_reports(date(2024, 6, 27), date(2024, 6, 28), 1, corp_code="short")
+    with pytest.raises(ValueError, match="disclosure type"):
+        client.list_reports(date(2024, 6, 27), date(2024, 6, 28), 1, pblntf_ty="Z")
 
 
 def test_all_pages_retained(tmp_path: Path) -> None:
@@ -424,6 +430,7 @@ def test_title_and_listing_filters(tmp_path: Path) -> None:
                 _row("20240531000003", cls="N"),
                 _row("20240531000004", stock="00000"),
                 _row("20240531000005", report="[기재정정] 주요사항보고서(자기주식취득결정) ", cls="K"),
+                _row("20240531000006", report="[첨부정정] 주요사항보고서(자기주식취득결정) ", cls="K"),
             ],
             count=1,
         )

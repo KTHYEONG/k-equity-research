@@ -278,29 +278,56 @@ def _run_backfill_dart(args: argparse.Namespace) -> int:
     event_store = EventStore(catalog)
     http_client = httpx.Client(timeout=30.0)
     try:
-        summary = collect_buyback_history(
-            DartClient(api_key, http_client),
-            catalog,
-            lake,
-            start,
-            end,
-            root,
-            snapshot_id,
-            DocumentLimits(),
-            event_store=event_store,
-        )
+        client = DartClient(api_key, http_client)
+
+        class _DisclosureTypeClient:
+            """Limit historical listing to one verified buyback-bearing DART type."""
+
+            def __init__(self, pblntf_ty: str) -> None:
+                self.pblntf_ty = pblntf_ty
+
+            def list_major_reports(self, window_start: date, window_end: date, page: int) -> object:
+                return client.list_reports(window_start, window_end, page, pblntf_ty=self.pblntf_ty)
+
+            def document_zip(self, rcept_no: str) -> bytes:
+                return client.document_zip(rcept_no)
+
+            def current_buyback_details(self, corp_code: str, window_start: date, window_end: date) -> bytes:
+                return client.current_buyback_details(corp_code, window_start, window_end)
+
+        summaries = {
+            pblntf_ty: collect_buyback_history(
+                _DisclosureTypeClient(pblntf_ty),  # type: ignore[arg-type]
+                catalog,
+                lake,
+                start,
+                end,
+                root,
+                f"{snapshot_id}-{pblntf_ty}",
+                DocumentLimits(),
+                event_store=event_store,
+            )
+            for pblntf_ty in ("B", "E")
+        }
     finally:
         http_client.close()
+    summary = {
+        field: sum(getattr(item, field) for item in summaries.values())
+        for field in (
+            "documents_fetched",
+            "documents_reused",
+            "events_accepted",
+            "list_pages_fetched",
+            "list_pages_reused",
+            "windows_complete",
+        )
+    }
     sys.stdout.write(
         json.dumps(
             {
-                "documents_fetched": summary.documents_fetched,
-                "documents_reused": summary.documents_reused,
-                "events_accepted": summary.events_accepted,
-                "list_pages_fetched": summary.list_pages_fetched,
-                "list_pages_reused": summary.list_pages_reused,
-                "snapshot_id": snapshot_id,
-                "windows_complete": summary.windows_complete,
+                **summary,
+                "disclosure_types": ["B", "E"],
+                "snapshot_ids": {kind: f"{snapshot_id}-{kind}" for kind in summaries},
             }
         )
         + "\n"

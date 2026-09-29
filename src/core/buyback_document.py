@@ -21,6 +21,28 @@ _FIRST_SUBMISSION_RE = re.compile(
 )
 
 _EXPECTED_SECTION = "자기주식 취득 결정"
+_XML_AMPERSAND_RE = re.compile(r"&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9A-Fa-f]+;)")
+_XML_CDATA_RE = re.compile(r"(<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>)", re.DOTALL)
+
+
+def _parse_receipt_xml(payload: bytes) -> ET.Element:
+    """Parse DART XML, retrying after escaping literal ampersands outside CDATA/comments."""
+    try:
+        document = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("malformed receipt document") from exc
+    try:
+        return ET.fromstring(document)  # noqa: S314 - source XML is authenticated, hash-registered, and bounded by DocumentLimits
+    except ET.ParseError:
+        parts = _XML_CDATA_RE.split(document)
+        repaired = "".join(
+            part if index % 2 else _XML_AMPERSAND_RE.sub("&amp;", part)
+            for index, part in enumerate(parts)
+        )
+        try:
+            return ET.fromstring(repaired)  # noqa: S314 - source XML is authenticated, hash-registered, and bounded by DocumentLimits
+        except ET.ParseError as exc:
+            raise ValueError("malformed receipt document") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,10 +219,7 @@ def parse_buyback_document(
     if not filing.rcept_no:
         raise ValueError("filing receipt number must be non-empty")
     member_name, payload, document_hash = _select_member(raw_zip, limits)
-    try:
-        root = ET.fromstring(payload.decode("utf-8"))  # noqa: S314 - receipt bytes come from the authenticated DART document endpoint, are hash-registered locally before parsing, and are bounded by DocumentLimits
-    except (UnicodeDecodeError, ET.ParseError) as exc:
-        raise ValueError("malformed receipt document") from exc
+    root = _parse_receipt_xml(payload)  # noqa: S314 - authenticated DART receipt bytes are hash-registered locally and bounded by DocumentLimits
     parents: dict[ET.Element, ET.Element] = {}
     for parent in root.iter():
         for child in parent:

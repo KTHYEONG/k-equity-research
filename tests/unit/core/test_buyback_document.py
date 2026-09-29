@@ -261,6 +261,16 @@ def test_nested_value_elements_resolve_row_coordinates() -> None:
     assert "취득예정주식" in fact.evidence.cell
 
 
+def test_literal_ampersand_in_dart_text_is_recovered_without_changing_source_hash() -> None:
+    """DART receipts sometimes contain unescaped ampersands in company names."""
+    malformed = _wrap(_row("취득예정주식(주)", "보통주식", "ACQ_OSTK", "3,652")).replace(
+        b"</COMPANY-NAME>", b" & SECURITIES</COMPANY-NAME>"
+    )
+    parsed = parse_buyback_document(_filing(ORIG, malformed), malformed, DocumentLimits())
+    assert parsed.document_hash == hashlib.sha256(malformed).hexdigest()
+    assert _fact_map(parsed)["ACQ_OSTK"].value_decimal == Decimal("3652")
+
+
 def test_archive_guards_reject_malformed_inputs() -> None:
     """Empty, mislabeled, over-budget and malformed archives fail closed."""
     filing = _filing(ORIG, b"PK\x03\x04x")

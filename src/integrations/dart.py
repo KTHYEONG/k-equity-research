@@ -146,7 +146,14 @@ class DartClient:
         """
         return self.list_reports(start, end, page)
 
-    def list_reports(self, start: date, end: date, page: int, corp_code: str | None = None) -> DartListPage:
+    def list_reports(
+        self,
+        start: date,
+        end: date,
+        page: int,
+        corp_code: str | None = None,
+        pblntf_ty: str | None = None,
+    ) -> DartListPage:
         """Fetch one all-category list page, optionally limited to one issuer.
 
         Keep corrections with last_reprt_at=N and preserve original response
@@ -159,6 +166,8 @@ class DartClient:
             raise ValueError("collection window must not be empty")
         if corp_code is not None and (len(corp_code) != 8 or not corp_code.isdigit()):
             raise ValueError("corp code must be an 8-digit string")
+        if pblntf_ty is not None and pblntf_ty not in "ABCDEFGHIJ":
+            raise ValueError("disclosure type must be one of A through J")
         params = {
             "crtfc_key": self._api_key,
             "bgn_de": start.strftime("%Y%m%d"),
@@ -169,6 +178,8 @@ class DartClient:
         }
         if corp_code is not None:
             params["corp_code"] = corp_code
+        if pblntf_ty is not None:
+            params["pblntf_ty"] = pblntf_ty
         attempts = 0
         while True:
             attempts += 1
