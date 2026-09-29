@@ -119,6 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
     memo.add_argument("--agent-max-calls", type=int, default=3)
     memo.add_argument("--agent-prompt-version", default="v1")
     _add_data_root(memo)
+    repair = research_sub.add_parser("repair-memo", help="Rebuild one historical memo with verified analogue evidence.")
+    repair.add_argument("--run-id", required=True)
+    repair.add_argument("--index-manifest", required=True)
+    _add_data_root(repair)
     evaluation = subparsers.add_parser("eval", help="Frozen replay and stratified evaluation.")
     eval_sub = evaluation.add_subparsers(dest="eval_command", required=True)
     replay = eval_sub.add_parser("replay", help="Replay pinned cases and aggregate stratified quality.")
@@ -680,6 +684,27 @@ def _run_research_memo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_research_repair_memo(args: argparse.Namespace) -> int:
+    from src.research.repair import repair_memo_evidence
+
+    root = _resolve_data_root(args.data_root)
+    summary = repair_memo_evidence(root, args.run_id, args.index_manifest)
+    sys.stdout.write(
+        json.dumps(
+            {
+                "old_run_id": summary.old_run_id,
+                "new_run_id": summary.new_run_id,
+                "run_id": summary.new_run_id,
+                "proof_sha256": summary.proof_sha256,
+                "analogue_proof": summary.proof_sha256,
+                "manifest_hash": summary.manifest_hash,
+            }
+        )
+        + "\n"
+    )
+    return 0
+
+
 def _run_eval_replay(args: argparse.Namespace) -> int:
     from src.eval.replay import evaluate_cases, load_cases, render_report_markdown, report_to_dict
 
@@ -821,6 +846,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_extract_archive(args)
         if args.command == "research" and args.research_command == "memo":
             return _run_research_memo(args)
+        if args.command == "research" and args.research_command == "repair-memo":
+            return _run_research_repair_memo(args)
         if args.command == "eval" and args.eval_command == "replay":
             return _run_eval_replay(args)
         if args.command == "batch" and args.batch_command == "daily":
