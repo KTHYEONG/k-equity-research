@@ -383,14 +383,24 @@ def _collect(
             evidence_dirs[child.name.lower()] = child
 
     candidates = {str(row["sha256"]).lower() for row in raw_rows} | set(evidence_dirs)
+    source_import_hashes: set[str] = set()
     for dataset_id in _SOURCE_IDS:
         manifest_path = checked_local_path(root, PurePosixPath("imports") / dataset_id / "manifest.json")
         if manifest_path.is_symlink() or not manifest_path.is_file():
             continue
         source = _read_manifest(root, dataset_id)
-        candidates.update(part.sha256.lower() for part in source.parts)
+        source_import_hashes.update(part.sha256.lower() for part in source.parts)
+        source_import_hashes.add(_sha256_file(manifest_path))
+        source_import_hashes.add(source.source_manifest_sha256.lower())
+    candidates.update(source_import_hashes)
     references = catalog.references_to_hashes(frozenset(candidates))
-    blocking = sorted({run for runs in references.values() for run in runs} - set(retired_run_ids))
+    # Referenced raw artifacts and financial evidence are retained below.
+    # Only cited source imports remain blockers: their parts and manifest are
+    # slated for unconditional removal as a complete obsolete dataset.
+    blocking = sorted(
+        {run for digest, runs in references.items() if digest in source_import_hashes for run in runs}
+        - set(retired_run_ids)
+    )
     cited = {digest for digest, runs in references.items() if set(runs) - set(retired_run_ids)}
 
     obsolete_imports: list[Path] = []

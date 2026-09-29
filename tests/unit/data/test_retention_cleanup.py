@@ -296,7 +296,7 @@ def test_active_parts_never_obsolete(tmp_path: Path) -> None:
     """Active scoped parts stay retained while superseded sources are listed exactly once."""
     rig = _rig(tmp_path)
     plan = plan_local_retirement(rig["root"], rig["catalog"], rig["store"])  # type: ignore[arg-type]
-    assert plan.blocking_run_ids == ("run-pilot",)
+    assert plan.blocking_run_ids == ()
     for dataset_id in (DERIVED_PANEL_DATASET_ID, DERIVED_UNIVERSE_DATASET_ID, DERIVED_FACTS_DATASET_ID):
         part = rig["root"] / "imports" / dataset_id / "part-00000.parquet"  # type: ignore[operator]
         assert part not in plan.obsolete_import_parts
@@ -318,13 +318,14 @@ def test_active_parts_never_obsolete(tmp_path: Path) -> None:
     assert again == plan
 
 
-def test_pilot_citation_blocks_then_retires(tmp_path: Path) -> None:
-    """A cited pilot run blocks execution until retired, then retires with its artifacts."""
+def test_pilot_citation_is_preserved_then_explicitly_retires(tmp_path: Path) -> None:
+    """Unrelated data can retire while a cited pilot stays, then explicit run retirement releases it."""
     rig = _rig(tmp_path)
     plan = plan_local_retirement(rig["root"], rig["catalog"], rig["store"])  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="research run reference"):
-        execute_local_retirement(plan, rig["root"], rig["catalog"], frozenset())  # type: ignore[arg-type]
+    assert plan.blocking_run_ids == ()
+    execute_local_retirement(plan, rig["root"], rig["catalog"], frozenset())  # type: ignore[arg-type]
     assert rig["cited_path"].is_file()  # type: ignore[union-attr]
+    assert rig["catalog"]._conn.execute("SELECT COUNT(*) FROM research_run").fetchone()[0] == 1  # type: ignore[union-attr]  # noqa: SLF001
     retired = frozenset({*rig["run_ids"], "ghost-run"})  # type: ignore[union-attr]
     approved = plan_local_retirement(rig["root"], rig["catalog"], rig["store"], retired)  # type: ignore[arg-type]
     assert approved.blocking_run_ids == ()
@@ -347,6 +348,20 @@ def test_pilot_citation_blocks_then_retires(tmp_path: Path) -> None:
     again = plan_local_retirement(rig["root"], catalog, rig["store"], retired)  # type: ignore[arg-type]
     assert again.blocking_run_ids == ()
     execute_local_retirement(approved, rig["root"], catalog, retired)  # type: ignore[arg-type]
+
+
+def test_cited_source_import_part_still_blocks_retirement(tmp_path: Path) -> None:
+    """An obsolete source part cannot be removed while a run cites its exact bytes."""
+    rig = _rig(tmp_path)
+    root = rig["root"]
+    part = root / "imports" / SOURCE_PANEL_DATASET_ID / "part-00000.parquet"  # type: ignore[operator]
+    run_dir = root / "reports" / "evt-1" / "run-pilot"  # type: ignore[operator]
+    (run_dir / "memo.json").write_text(json.dumps({"source_part_hash": _sha(part.read_bytes())}))
+    plan = plan_local_retirement(root, rig["catalog"], rig["store"])  # type: ignore[arg-type]
+    assert plan.blocking_run_ids == ("run-pilot",)
+    with pytest.raises(ValueError, match="research run reference"):
+        execute_local_retirement(plan, root, rig["catalog"], frozenset())  # type: ignore[arg-type]
+    assert part.is_file()
 
 
 def test_unknown_run_blocks_without_deletion(tmp_path: Path) -> None:
