@@ -1,46 +1,45 @@
 ---
 name: probe
-description: Explore hypotheses, conduct empirical scratch experiments, and establish high-reasoning design rationale before contracting.
+description: High-reasoning diagnostic protocol to analyze root causes, test hypotheses empirically, and establish invariants before specification.
 ---
 
 # Probe Protocol
 
-High-reasoning exploratory protocol to formulate hypotheses, uncover failure modes, and empirically validate solutions via scratch experiments before freezing contracts.
+High-reasoning diagnostic protocol dedicated to **causal discovery, empirical validation, and failure-mode analysis** before specification.
 
-## Allocation
+## Cognitive Focus
 
-Your cognitive budget is focused on **causal root-cause discovery, architectural trade-offs, and empirical stress testing**.
-Focus on: *What is the fundamental causality behind this state? What competing architectures resolve it? Under what realistic boundary conditions does each approach break?*
+Your cognitive budget is focused 100% on **Problem Space**:
+*What is the fundamental causality behind this state? Under what realistic boundary conditions does it fail? What deterministic invariants must be established?*
 
 ## Directives
 
-1. **Focused Context**:
-   - Inspect the target module and its immediate 1-depth callers or fixtures using targeted `grep` / `view_file`.
-   - Challenge historical assumptions when current empirical evidence contradicts past decisions.
+1. **Diagnostic Rigor & Efficient Pathing**:
+   - For straightforward logical bugs or direct code-path flaws, isolate the root cause via static inspection without creating unnecessary scratch files.
+   - For numerical discrepancies, subtle data pipeline distortions, or multi-step anomalies, do NOT guess. Write and run a lightweight script under `scratch/` to measure real values and reproduce failures deterministically.
 
-2. **Empirical Probing (When Warranted)**:
-   - When verifying non-obvious mathematical behavior, data transformations, or reproducing complex failures, create a lightweight scratch probe in `scratch/` and execute it via the project's runner.
-   - Measure real values, state transformations, or execution bottlenecks directly on actual or synthetic workloads.
-   - For straightforward defect isolation or direct code-path inspection, proceed with static reasoning and direct codebase checks without creating unnecessary scratch files.
+2. **Concept Blueprinting (No Production Sprawl)**:
+   - Do NOT generate full production patches or extensive files.
+   - You may include minimal 1-3 line conceptual snippets if they demonstrate the resolution mechanism clearer than prose. Leave full implementation contracts for `/spec`.
 
-3. **Invariants & Performance Budget**:
-   - Define strict Fail-Closed invariants and domain boundaries.
-   - If touching backtest, training, or bulk I/O, draft a realistic performance budget (memory, data scale, chunking).
+3. **Invariants & Boundary Conditions**:
+   - Formulate unambiguous Fail-Closed invariants (what state transitions must be strictly forbidden).
+   - Evaluate trade-offs between competing architectural fixes.
 
-4. **Seamless Transition**:
-   - Diagnosis, invariants, and architectural decisions established here flow directly through the conversation context into `spec`. Intermediate JSON files are not required.
+4. **Handoff**:
+   - Conclude by handing off proven invariants and root causes to `/spec` (or directly to implementation for minor fixes).
 
 ## Chat Output Format
 
-Keep chat response clear, intuitive for humans, and token-efficient. Retain English keys/badges while writing descriptions in natural Korean (한국어):
+Keep chat response clear, intuitive for humans, and token-efficient. Retain the emoji and Korean label headers while writing descriptions in natural Korean:
 
-### 🔬 [PROBE] <Feature / Topic Title>
+### 🔬 [PROBE] <Topic Title>
 
-- 🔍 **Problem**: <결함 또는 요구사항 1-2줄 직관적 요약>
-- ⚙️ **Root Cause**: <데이터 흐름 또는 시스템 제약상의 원인 1-2줄>
-- 🛠️ **Resolution**: <선택한 기술적 접근법 및 핵심 근거 1-2줄>
-- 🎯 **Impact**: <시스템 및 사용자 관점의 개선 효과 1줄>
-- ⚠️ **Caveats**: <핵심 가정, 경계 조건 및 주의사항 1-2줄>
+> 💡 **한눈에 보기**: <Intuitive real-world analogy or plain-language summary in Korean that anyone can grasp in 3 seconds>
 
----
-👉 Next Step: Run `spec` skill (e.g. `/spec <feature>`)
+- 🔍 **현상**: <User-facing anomaly or core issue in natural Korean>
+- ⚙️ **원인**: <Data/numerical/causal root cause in 1-2 lines in natural Korean>
+- 📊 **실측 증거**: <Empirically measured numbers, error magnitude, or reproduced state (optional)>
+- 🛠️ **해결 전략**: <How to resolve, core mechanism, and optional 1-3 line concept snippet in natural Korean>
+- 🔒 **핵심 불변식**: <1-2 non-negotiable safety invariants in natural Korean>
+- ⚠️ **주의사항**: <Boundary conditions, performance limits, or caveats in 1 line in natural Korean>

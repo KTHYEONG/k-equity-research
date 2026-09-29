@@ -4,17 +4,18 @@
 
 ## 1. Development Paradigm: Invariant-Driven Development (IDD)
 - **Contracts Over Premature Tests:** Prioritize strict static typing, explicit schema models, and domain invariants over dogmatic test-first rituals. Define the interface and invariants before writing code; avoid premature test code that freezes internal APIs.
-- **Two-Track Workflow (Escape Ceremony Trap):**
-  - *Fast-Track (Surgical fixes, 1-2 files, bugfixes, config changes):* Direct implementation + Invariant Guard Test -> Project verification toolchain. Spec documents are not required for small localized changes.
-  - *Standard Track (New modules, complex algorithms, pipeline changes):* Probe (scratch experiment) -> Spec (contract & invariant scenarios) -> Implement (logic & guard tests) -> Check.
+- **Pragmatic Invariant Verification (Zero Ceremony):**
+  - *Direct Execution (Bug fixes, localized changes, data probes, scripts):* Implement directly with targeted invariant guard tests and verify via the project toolchain. Formal specs are not required for localized work.
+  - *Contract Design (Complex interfaces, multi-component pipelines):* Formulate explicit interface contracts and invariant scenarios (`docs/specs/*_spec.md`) before implementation.
+  - *On-Demand Utilities:* Skills (`probe`, `spec`, `implement`, `check`) are independent tools, not a mandatory sequential conveyor belt.
 - **Observable Behavior & Invariants:** Verify return contracts, state mutations, conservation laws, and error conditions rather than private implementation details or mock call-counts.
 - **In-Memory & Minimal Inputs:** Use the smallest deterministic synthetic data sufficient to test target logic near-instantaneously; never load multi-year disk datasets in unit tests.
-- **Do Not Test Profitability:** Unit and integration tests verify correctness, edge cases, and schema transformations—never long-horizon profitability, market alpha, or model convergence.
+- **Functional Correctness Over Stochastic Outcomes:** Unit and integration tests verify contract correctness, edge cases, and schema transformations—never long-horizon statistical convergence or business outcomes.
 
-## 2. Quantitative & Financial Invariant Testing
-- **Financial Invariants:** Verify structural conservation laws: cash/position/NAV reconciliation, exposure and leverage limits, deterministic outputs for identical inputs, and deduplication of orders/fills.
-- **Temporal & Numerical Boundaries:** Stress-test boundary conditions rather than happy paths alone: zeros, NaNs, empty universes, missing bars, market holidays, duplicate timestamps, timezone transitions, and floating-point tolerances (explicit epsilon bounds, relative/absolute tolerances like `rtol`/`atol`).
-- **No Look-Ahead Invariance:** Explicitly test that signal and execution calculations do not access future time steps or unreleased event timestamps.
+## 2. State Invariants & Boundary Testing
+- **Conservation & State Invariants:** Verify structural conservation laws: balance/resource reconciliations, allocation parity, deterministic outputs for identical inputs, and idempotent deduplication of operations.
+- **Temporal & Numerical Boundaries:** Stress-test boundary conditions rather than happy paths alone: zeros, NaNs, empty collections, missing keys, boundary timestamps, timezone transitions, and floating-point tolerances (explicit epsilon bounds, relative/absolute tolerances like `rtol`/`atol`).
+- **Causal Invariance:** Explicitly test that calculations do not access future time steps, uninitialized state, or unreleased data.
 
 ## 3. Execution, Latency Budgets & Failure Triage
 - **Latency Budgets:** Fast unit tests must execute near-instantaneously using in-memory fixtures. Heavy end-to-end simulations, full model retraining, or multi-year workloads must be marked with explicit boundary tags and isolated from default test runs.
@@ -25,9 +26,5 @@
 - **Pragmatic Fixtures & Mocking:** Mock external boundaries (network APIs, clock/system time, filesystem I/O). Never mock internal domain calculations or transform tests into meaningless mock-chains.
 
 ## 4. Diff-Coverage & Quality Philosophy
-- **Diff-Coverage & Domain Invariant Focus:** Do not chase global percentage quotas across untouched legacy modules. Focus on thorough test coverage of newly-added production logic, ensuring domain transformations and boundary scenarios are verified.
-- **Uncovered Line Resolution Protocol:** If new lines are reported as uncovered by diff-coverage, evaluate:
-  1. *Is it a genuine domain branch/exception?* -> Add a targeted scenario test exercising that boundary.
-  2. *Is it speculative defensive code or unreachable dead branches?* -> **Do NOT write artificial tests; remove the defensive bloat and simplify the code.**
-  3. *Is it abstract interface declarations, typing guards, or non-deterministic environment scaffolding where testing would require vacuous mocks?* -> Use explicit coverage exclusion annotations sparingly rather than constructing fragile, artificial mock chains solely to satisfy coverage counters.
+- **Diff-Coverage & Domain Focus:** Focus test coverage on newly-added production logic and critical boundary scenarios. Prune dead defensive branches rather than writing vacuous tests, and use coverage exclusion annotations sparingly for non-testable scaffolding.
 - **Test Integrity:** Never weaken assertions, delete valid tests, or skip failing checks to satisfy CI. Diagnose and fix the root cause.

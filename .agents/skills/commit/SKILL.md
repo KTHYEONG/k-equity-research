@@ -10,10 +10,12 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
 ## Directives
 
 1. **Task-Scoped Working-Tree Staging**:
-   - Inspect `git status --short` and stage ONLY the files verified as part of the current task/spec scope (`git add <file1> <file2> ...`).
+   - Inspect `git status --short`. If there are no staged or modified files for the task, do not force an empty commit; report clean working tree and halt.
+   - Stage ONLY the files verified as part of the current task scope (`git add <file1> <file2> ...`).
    - Do NOT perform blind blanket staging (`git add .` or `git add -A`) when unrelated working tree modifications exist.
    - Do not stage ephemeral artifacts: `scratch/`, `tmp/`, local build/test caches, compiled binaries/bytecode, or logs.
-   - **Specs Are NOT Commit Targets**: Never stage temporary specs or contract files under `docs/specs/` (`*.md`, `*_contract.json`). Specs are transient development artifacts and must be excluded from all commits.
+   - **Specs Are Gitignored**: `docs/specs/` is gitignored by contract. Specs serve as model/tool handoff blueprints and must never be forced into VCS staging.
+   - **Post-Commit Spec Cleanup**: Upon successful commit, purge completed temporary blueprints under `docs/specs/*.md` to keep the local workspace clean and zero-debt.
 
 2. **Commit Type Determination**:
    - Determine `<type>` based on the primary nature of the core changes:
@@ -22,11 +24,10 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
      - `refactor:`: Code refactoring, restructuring, or renaming without behavioral changes.
      - `chore:`: Tooling, configs, scripts, rules (`pyproject.toml`, `.agents/`, `tools/`, `.gitignore`).
      - `docs:`: Standalone documentation changes (`README.md`, guides, architecture docs) with NO production code changes.
-   - **No Artificial `docs:` Splitting**: When a feature or bugfix task updates `task_index.json` and `code_map.json` during `/sync`, commit them together in the same atomic `feat:` or `fix:` commit. Do NOT downgrade or split the commit into an artificial `docs:` commit.
 
 3. **Strict Korean Language Invariant (Subject & Body)**:
    - **All commit subjects and Why bodies MUST be written in natural Korean.**
-   - **Subject Format**: `<type>: <한국어 1줄 요약 <= 50자>` (명확한 비즈니스/기능 목적 지향)
+   - **Subject Format**: `<type>: <한국어 1줄 요약 <= 50자>` (비즈니스/기능 목적 지향)
      - ✅ CORRECT: `feat: KIS 투자자 수급 데이터 파이프라인 연동`
      - ❌ FORBIDDEN: `feat: flow union, KIS industry, 2016 scope`
      - ✅ CORRECT: `fix: 주문 체결 슬리피지 계산 오차 보정`
@@ -39,12 +40,16 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
    - **Body Format**: `- **Why:** <해결한 구체적 문제나 비즈니스 목적을 명확한 한국어로 기술>`
      - Example: `- **Why:** 실시간 수급 불균형 지표 산출을 위한 외국인·기관 순매수 데이터 필요`
    - **Prohibited Metadata**: Do not add `Co-authored-by:`, AI model names, or session trailers. Keep commits clean with only subject and rationale.
+   - **Execution Safety**: Use safe quoting or heredoc syntax to prevent shell syntax errors when commit messages contain special characters.
+
+4. **Verification**:
+   - Verify the commit succeeded by checking `git log -1 --format="%h %s"`.
 
 ## Output
 
 Return ONLY the minimal summary card below:
 
-### 📌 [COMMIT] COMPLETE
+### 📌 [COMMIT] 완료
 
-- **Commit**: `[<short_hash>]` <subject>
-- **Summary**: <commit_count> commit(s) | <total_files_changed> file(s) changed
+- 📌 **커밋**: `[<short_hash>]` <subject>
+- 📊 **변경 내역**: <commit_count> commit(s) | <total_files_changed> file(s) changed

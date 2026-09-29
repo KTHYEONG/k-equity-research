@@ -1,64 +1,53 @@
 ---
 name: check
-description: Independently audit contract compliance, typing, regressions, coverage, and test validity.
+description: Universal code review and multi-lens quality verification auditor.
 ---
 
-# Check Protocol
+# Universal Code Review & Quality Audit Protocol
 
-Independent audit gate completing the development loop (`probe` -> `spec` -> `implement` -> `check`). Performs deterministic mechanical verification followed by semantic review.
+Senior-level adversarial code auditor combining **fast mechanical verification** with **deep cognitive AI code review**. Completely decoupled from specific scripts or spec files. Operates on any `git diff`, working tree, or designated targets across any programming language.
 
 ## Directives
 
-1. **Scope Identification**:
-   - Inspect modified files using `git status --short`.
-   - Identify active spec under `docs/specs/*_spec.md`.
+1. **Target Scoping & Spec-Independence**:
+   - Scope targets automatically via `git status --short` / `git diff HEAD`, or inspect user-specified files/modules.
+   - **Specs Are Strictly Optional Context**: If an active spec (`docs/specs/*_spec.md`) exists, cross-reference contract adherence against it. If NO spec exists, audit code directly against codebase architecture, domain invariants, and engineering standards.
 
-2. **Tier 1: Deterministic Mechanical Gate**:
-   - Execute the unified quality verification gate:
-     ```bash
-     uv run python tools/agent_skills/lean_check.py
-     ```
-     (Pass `--spec docs/specs/<feature>_spec.md` if scoped to an active specification).
-   - Verifies 4 mechanical pillars:
-     1) **Scaffolding Exclusion**: No temporary comments, unresolved markers, or test skeletons in production paths.
-     2) **Static Analysis & Linting**: Syntax correctness, idiomatic formatting, and static rule adherence.
-     3) **Type Integrity**: Complete type annotations and strict static type/compilation check.
-     4) **Invariant Test Suite & Diff-Coverage**: All unit tests pass, and every modified production branch is verified.
-   - If Tier 1 fails on minor deterministic issues, apply surgical remediation (Section 4) and re-verify once. If failures persist or reveal unresolvable domain bugs, stop immediately and report diagnostics without proceeding to Tier 2.
+2. **Step 1: Fast Mechanical Verification Gate**:
+   - Run the project's native verification toolchain declared in `AGENTS.md` under `Project Toolchain` (or detected via repo manifests, e.g. `pytest`, `cargo test`, `pnpm test`, `go test`, `make check`):
+     - Compilation/syntax, static typing, linter adherence, and test suites.
+   - **Token-Conscious Output Policy**:
+     - *On Success*: Suppress raw terminal dumps. Output only a compact 1-line badge (e.g. `Build clean · 42 tests passed`).
+     - *On Failure*: Extract and report only the failing file, line number, and core error message (1-2 lines) to keep context lean.
 
-3. **Tier 2: Semantic Review**:
-   Review the `git diff` across three engineering lenses:
-   1) **Test Efficacy**: Assertions validate real state transformations and domain calculations rather than vacuous checks or over-mocked logic.
-   2) **Contract & Invariants**: Pre/post conditions, domain invariants, edge conditions, and error branches are handled safely.
-   3) **Clean Wiring & Code Health**: New logic connects to production entry points without ghost paths, dead defensive fallback blocks, or temporary scaffolding.
+3. **Step 2: Adversarial Cognitive Code Review (4 Core Lenses)**:
+   Adopt an adversarial reviewer mindset (*"If this causes a production outage, where is the flaw?"*):
+   1) **State & Causal Integrity**: Verify chronological ordering, zero state leaks, conservation laws, and numerical/boundary robustness.
+   2) **Fail-Closed Robustness**: Reject swallowed exceptions and arbitrary fallback defaults. Fail safely and explicitly.
+   3) **Blast Radius & Ripple Effects**: Ensure modified signatures, shared state, or lifecycle resources do not break upstream callers.
+   4) **Test Authenticity**: Verify tests assert genuine state transformations and domain invariants rather than vacuous tautologies or over-mocking.
 
-4. **Surgical Remediation**:
-   - The auditor may apply pinpoint fixes for deterministic issues:
-     1) Minor typing, import/module binding, or format inconsistencies.
-     2) Test fixture adjustments or assertion strengthening.
-     3) Removal of dead code or temporary comments.
-   - Re-run verification to confirm the fix is green.
+4. **Step 3: Autonomous Remediation (Review-Fix-Verify Loop)**:
+   - For minor or deterministic findings (lint/format issues, unused imports, missing boundary assertions, leftover debug statements):
+     - Apply surgical pinpoint fixes immediately.
+     - Re-run the mechanical gate to ensure green status.
+     - Note the fix in the final review summary.
+   - For structural or architectural flaws, do NOT guess—report them clearly as Blockers.
 
-5. **Non-Destructive Audit Rule (CRITICAL)**:
-   - **NEVER delete, rename, or purge spec files (`docs/specs/*_spec.md`).**
-   - The audit gate is strictly non-destructive. Spec archival and cleanup is exclusively reserved for the downstream `/sync` phase.
+5. **Non-Destructive Audit Rule**:
+   - Never delete, rename, or purge specifications, test files, persistent configurations, or user files. Auditing is strictly non-destructive.
 
-## Output
+## Chat Output Format
 
-Keep chat output compact and token-efficient. Retain English keys/badges while writing descriptions in natural Korean (한국어):
-When all checks pass, output only the minimal summary card below without echoing internal checklists:
+Keep output concise, actionable, and token-efficient. Retain English badges/keys while writing descriptions in natural Korean (한국어):
 
-### 🛡️ [CHECK] <Audit Target>
-> 🚦 **Verdict**: ✅ PASS
+### 🛡️ [CHECK] <Target / Module / Diff Scope>
+> 🚦 **Verdict**: [✅ APPROVED | 🟡 APPROVED WITH COMMENTS | ❌ CHANGES REQUESTED]
 
-- **Tier 1 (Mechanical)**: <정적 검사 · 타입 검증 · 테스트 실행 · Diff 커버리지 결과 요약>
-- **Tier 2 (Semantic)**: Test Efficacy · Invariants · Wiring 검증 완료
-*(Optional, only when surgical fix was applied)*:
-- 🔧 **Remediation**: <적용한 정밀 수정 1줄 요약>
-
-*(On Failure)*:
-### 🛡️ [CHECK] <Audit Target>
-> 🚦 **Verdict**: ❌ FAIL
-
-- 💥 **Reason**: [<Tier 1 | Tier 2>] <실패 원인 및 위반 불변식 1줄>
-- 🎯 **Action**: <필요한 해결 조치 1줄>
+- 🧪 **Toolchain**: <컴파일 · 린트 · 테스트 N건 통과 요약 (로그 은닉)>
+- 🔍 **Adversarial Review**:
+  - 🚨 **Blockers**: <인과성 위반, 심각한 버그, 계약 파기 (없으면 '없음')>
+  - ⚠️ **Risks & Edge Cases**: <예외 은폐, 엣지케이스 미처리, 파급 효과 주의점 (없으면 '없음')>
+  - 🧪 **Test Efficacy**: <테스트 단언문의 실질성 및 보강 필요 시나리오 (충분하면 '완전')>
+*(Optional, only if auto-remediation was performed)*:
+- 🔧 **Auto-Remediated**: <적용한 정밀 수정 1줄 요약 및 재검증 완료 보고>

@@ -9,7 +9,7 @@ Produce an unambiguous implementation blueprint (`docs/specs/<feature>_spec.md`)
 
 ## Allocation
 
-The design rationale and empirical proof are resolved in `/probe`.
+The design rationale, user requirements, and technical boundaries may come from user discussion, codebase inspection, or an exploratory probe.
 Your output in `/spec` focuses strictly on:
 1. **Target Interfaces & Invariants**: Exact signatures, finalized production docstrings (explaining Why and constraints), and bulleted core invariants. Do not include temporary pseudo-code, code skeletons, or recipes in docstrings or invariants (prevents model anchoring and scaffolding leaks).
 2. **Wiring Points**: Caller anchor and invocation snippet.
@@ -18,7 +18,7 @@ Your output in `/spec` focuses strictly on:
 ## Directives
 
 1. **Context Alignment**:
-   - Infer feature context, invariants, and decisions directly from the preceding probe step.
+   - Infer feature context, invariants, and decisions from the user request, recent discussion, or preceding investigation.
    - Inspect target files and immediate callers for exact imports and AST anchors without scanning unrelated paths.
 
 2. **Sizing & Modularity (Single-Bolt Rule)**:
@@ -43,21 +43,23 @@ Your output in `/spec` focuses strictly on:
 
 ## Chat Output Format
 
-Keep chat output ultra-compact and token-efficient. Do NOT execute CLI commands or pre-impl validation loops.
-Output only the minimal card below (write summary in natural Korean):
+Keep chat output ultra-compact and token-efficient. Focus strictly on mechanical implementation execution targets and execution sequence:
 
 ### 📐 [SPEC] <Feature Name>
-> 📄 **Blueprint**: [`docs/specs/<feature>_spec.md`](docs/specs/<feature>_spec.md)
 
-- 🎯 **Summary**: <구현할 핵심 기능 1줄 요약> (<N> target file(s) · <N> scenario(s))
+- 🎯 **요약**: <1-line Korean summary of core capability> (<N> target file(s) · <N> scenario(s))
 
-*(For single spec: run `implement` skill)*:
+*(단일 스펙 실행)*:
 ```bash
 /implement docs/specs/<feature>_spec.md
 ```
 
-*(For multi-spec split: execute sequentially)*:
+*(다중 분할 스펙 시 순차 실행 순서)*:
 ```bash
-/implement docs/specs/<sub_spec_1>.md
-/implement docs/specs/<sub_spec_2>.md
+# 1. Base layer / Data models
+/implement docs/specs/<feature>_part1_spec.md
+# 2. Business logic / Domain services
+/implement docs/specs/<feature>_part2_spec.md
+# 3. Upstream wiring & Interfaces
+/implement docs/specs/<feature>_part3_spec.md
 ```
