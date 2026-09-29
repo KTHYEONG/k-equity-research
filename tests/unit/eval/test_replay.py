@@ -697,3 +697,15 @@ def test_agent_run_marks_tool_outcome(tmp_path: Path) -> None:
     assert result.status == "OK"
     assert result.tool_valid is True
     assert result.fact_matches == 2
+
+
+def test_stale_memo_bytes_fail_evidence_validation(tmp_path: Path) -> None:
+    """A cited filing whose bytes changed after registration fails before fact scoring."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    target = data_root / f"raw/dart/{RCEPT}.zip"
+    target.write_bytes(b"tampered")
+    result = replay_case(_case(data_root, hashes=()), data_root)
+    assert result.status == "SOURCE_CHANGED"
+    assert result.manifest_hash == ""

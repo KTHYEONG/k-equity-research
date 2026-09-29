@@ -243,3 +243,20 @@ def test_destination_edge_cases(tmp_path: Path) -> None:
         catalog.register_artifact(
             **{**_artifact_kwargs("raw/dart/vanish.json"), "request_key": "other-key", "raw_bytes": b"other"},
         )  # type: ignore[arg-type]
+
+
+def test_research_run_lookup_returns_record(tmp_path: Path) -> None:
+    """Registered run records round-trip through the read-only lookup."""
+    catalog = _open(tmp_path)
+    assert catalog.get_research_run("missing") is None
+    payload = tmp_path / "data" / "runs" / "manifest.json"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_bytes(b'{"run": 1}')
+    manifest = _digest(b'{"run": 1}')
+    catalog.register_research_run("run-1", manifest, "COMPLETE", PurePosixPath("runs/manifest.json"))
+    record = catalog.get_research_run("run-1")
+    assert record is not None
+    assert record.run_id == "run-1"
+    assert record.manifest_hash == manifest
+    assert record.status == "COMPLETE"
+    assert record.local_path == PurePosixPath("runs/manifest.json")

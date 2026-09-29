@@ -22,6 +22,7 @@ from src.data.local_paths import checked_local_path
 from src.research.context import ResearchContext, ResearchUnavailable, build_research_context
 from src.research.event_study import StudyPolicy
 from src.research.memo import build_baseline_memo
+from src.research.publication import validate_memo_evidence
 
 CODE_REVISION = "eval-replay-v1"
 _HOLDOUT_YEAR = 2026
@@ -198,6 +199,10 @@ def _replay(
     if case.snapshot_id not in context.snapshot_ids:
         return _empty_result(case.case_id, "SOURCE_CHANGED", started), None
     baseline = build_baseline_memo(context)
+    try:
+        validate_memo_evidence(data_root, baseline)
+    except ValueError:
+        return _empty_result(case.case_id, "SOURCE_CHANGED", started), None
     if model is not None and agent_policy is not None:
         memo = AgentRunner().run(context, baseline, model, agent_policy)
         tool_valid = "AGENT_REJECTED" not in memo.statuses

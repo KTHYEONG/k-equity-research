@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 
 from src.research.context import ResearchContext
 
-CODE_REVISION = "memo-baseline-v1"
+CODE_REVISION = "memo-baseline-v2"
 
 _FACT_KEYS: dict[str, str] = {
     "ACQ_OSTK_PRC": "planned_amount_krw",
@@ -61,8 +61,9 @@ class ResearchMemo:
     manifest_hash: str
 
 
-def _manifest_hash(context: ResearchContext) -> str:
+def _manifest_hash(context: ResearchContext, analogue_ref: EvidenceRef | None = None) -> str:
     payload = {
+        "analogue_proof": analogue_ref.sha256.lower() if analogue_ref is not None else "UNAVAILABLE",
         "code_revision": CODE_REVISION,
         "index_manifest_hash": context.index_manifest_hash.lower(),
         "policy_version": context.study.policy_version,
@@ -89,8 +90,20 @@ def _evidence_by_id(evidence: tuple[EvidenceRef, ...]) -> dict[str, EvidenceRef]
     return {item.id: item for item in evidence}
 
 
-def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
-    """Render verified filing facts and deterministic research metrics into a reproducible cited memo. Omit unverified values and attach explicit uncertainty statuses instead of filling gaps with prose or invented numbers."""
+def build_baseline_memo(
+    context: ResearchContext,
+    analogue_ref: EvidenceRef | None = None,
+) -> ResearchMemo:
+    """Build a memo whose analogue claim exists only when its proof is citable.
+
+    Args:
+        context: Deterministic point-in-time research context.
+        analogue_ref: Run-local reference to verified analogue proof bytes.
+
+    Returns:
+        A memo with unchanged supported calculations and an explicit unavailable
+        analogue state when proof is absent.
+    """
     if context.as_of.tzinfo is None or context.as_of.utcoffset() is None:
         raise ValueError("as-of instant must be timezone-aware")
     filing_path, filing_digest = _filing_artifact(context)
@@ -161,9 +174,9 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
         "intraday_excess_s0": _format_decimal(context.study.intraday_excess),
         "model_alpha": _format_decimal(context.study.model_alpha),
         "model_beta": _format_decimal(context.study.model_beta),
-        "analogue_p25": _format_decimal(context.comparables.analogue_quantiles.get("p25")),
-        "analogue_median": _format_decimal(context.comparables.analogue_quantiles.get("median")),
-        "analogue_p75": _format_decimal(context.comparables.analogue_quantiles.get("p75")),
+        "analogue_p25": _format_decimal(context.comparables.analogue_quantiles.get("p25")) if analogue_ref is not None else None,
+        "analogue_median": _format_decimal(context.comparables.analogue_quantiles.get("median")) if analogue_ref is not None else None,
+        "analogue_p75": _format_decimal(context.comparables.analogue_quantiles.get("p75")) if analogue_ref is not None else None,
         "peer_count": str(len(context.comparables.peer_ids)),
         "analogue_count": str(len(context.comparables.analogue_event_ids)),
         "analogue_outcome_count": str(len(context.comparables.analogue_intraday_excess)),
@@ -171,70 +184,73 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
     }
     for horizon in sorted(context.study.horizon_car):
         metrics[f"car_h{horizon}"] = _format_decimal(context.study.horizon_car[horizon])
-    tool_path = filing_path if filing_path is not None else PurePosixPath("tool-result/memo-baseline.json")
     materiality_hashes = [h for h in context.materiality.source_hashes if h]
     study_hashes = [h for h in context.study.evidence_hashes if h]
     if metrics["amount_to_market_cap"] is not None or metrics["shares_to_listed_shares"] is not None:
         digest = materiality_hashes[0] if materiality_hashes else context.index_manifest_hash
-        ref_path = context.artifact_paths.get(digest, tool_path)
-        ref_id = "tool-materiality"
-        if ref_id not in _evidence_by_id(tuple(evidence)):
+        ref_path = context.artifact_paths.get(digest)
+        if ref_path is not None:
+            ref_id = "tool-materiality"
+            if ref_id not in _evidence_by_id(tuple(evidence)):
+                evidence.append(
+                    EvidenceRef(
+                        id=ref_id,
+                        source_kind="tool_result",
+                        local_relative_path=ref_path,
+                        sha256=digest.lower(),
+                        locator=f"materiality policy={context.study.policy_version} basis=prior-session-denominator",
+                    )
+                )
+            if metrics["amount_to_market_cap"] is not None:
+                claims.append(
+                    MemoClaim(
+                        kind="materiality",
+                        text=f"Observed planned amount relative to prior market value is {metrics['amount_to_market_cap']} (KRW basis, prior session).",
+                        evidence_ids=(ref_id,),
+                        metric_key="amount_to_market_cap",
+                    )
+                )
+            if metrics["shares_to_listed_shares"] is not None:
+                claims.append(
+                    MemoClaim(
+                        kind="materiality",
+                        text=f"Observed planned share quantity relative to listed shares is {metrics['shares_to_listed_shares']} (shares basis, prior session).",
+                        evidence_ids=(ref_id,),
+                        metric_key="shares_to_listed_shares",
+                    )
+                )
+    if metrics["intraday_excess_s0"] is not None:
+        digest = study_hashes[0] if study_hashes else context.index_manifest_hash
+        ref_path = context.artifact_paths.get(digest)
+        if ref_path is not None:
+            ref_id = "tool-intraday-s0"
             evidence.append(
                 EvidenceRef(
                     id=ref_id,
                     source_kind="tool_result",
                     local_relative_path=ref_path,
                     sha256=digest.lower(),
-                    locator=f"materiality policy={context.study.policy_version} basis=prior-session-denominator",
+                    locator=f"study policy={context.study.policy_version} window=first-safe-session-intraday",
                 )
             )
-        if metrics["amount_to_market_cap"] is not None:
+            session = context.study.first_safe_session
+            session_text = session.isoformat() if session is not None else "withheld session"
             claims.append(
                 MemoClaim(
-                    kind="materiality",
-                    text=f"Observed planned amount relative to prior market value is {metrics['amount_to_market_cap']} (KRW basis, prior session).",
+                    kind="price_path",
+                    text=f"Observed intraday movement on {session_text} is {metrics['intraday_excess_s0']} (stock open-to-close minus index open-to-close, decimal).",
                     evidence_ids=(ref_id,),
-                    metric_key="amount_to_market_cap",
+                    metric_key="intraday_excess_s0",
                 )
             )
-        if metrics["shares_to_listed_shares"] is not None:
-            claims.append(
-                MemoClaim(
-                    kind="materiality",
-                    text=f"Observed planned share quantity relative to listed shares is {metrics['shares_to_listed_shares']} (shares basis, prior session).",
-                    evidence_ids=(ref_id,),
-                    metric_key="shares_to_listed_shares",
-                )
-            )
-    if metrics["intraday_excess_s0"] is not None:
-        digest = study_hashes[0] if study_hashes else context.index_manifest_hash
-        ref_path = context.artifact_paths.get(digest, tool_path)
-        ref_id = "tool-intraday-s0"
-        evidence.append(
-            EvidenceRef(
-                id=ref_id,
-                source_kind="tool_result",
-                local_relative_path=ref_path,
-                sha256=digest.lower(),
-                locator=f"study policy={context.study.policy_version} window=first-safe-session-intraday",
-            )
-        )
-        session = context.study.first_safe_session
-        session_text = session.isoformat() if session is not None else "withheld session"
-        claims.append(
-            MemoClaim(
-                kind="price_path",
-                text=f"Observed intraday movement on {session_text} is {metrics['intraday_excess_s0']} (stock open-to-close minus index open-to-close, decimal).",
-                evidence_ids=(ref_id,),
-                metric_key="intraday_excess_s0",
-            )
-        )
     for horizon in sorted(context.study.horizon_car):
         value = metrics[f"car_h{horizon}"]
         if value is None:
             continue
         digest = study_hashes[0] if study_hashes else context.index_manifest_hash
-        ref_path = context.artifact_paths.get(digest, tool_path)
+        ref_path = context.artifact_paths.get(digest)
+        if ref_path is None:
+            continue
         ref_id = f"tool-car-h{horizon}"
         evidence.append(
             EvidenceRef(
@@ -253,14 +269,14 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
                 metric_key=f"car_h{horizon}",
             )
         )
-    if any(metrics[key] is not None for key in ("analogue_p25", "analogue_median", "analogue_p75")):
+    if analogue_ref is not None and any(metrics[key] is not None for key in ("analogue_p25", "analogue_median", "analogue_p75")):
         ref_id = "tool-analogues"
         evidence.append(
             EvidenceRef(
                 id=ref_id,
                 source_kind="tool_result",
-                local_relative_path=tool_path,
-                sha256=context.index_manifest_hash.lower(),
+                local_relative_path=analogue_ref.local_relative_path,
+                sha256=analogue_ref.sha256.lower(),
                 locator=f"comparables outcomes={len(context.comparables.analogue_intraday_excess)} basis=pre-filing-only",
             )
         )
@@ -277,6 +293,8 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
                 metric_key="analogue_median",
             )
         )
+    if analogue_ref is None:
+        statuses.add("ANALOGUE_EVIDENCE_UNVERIFIED")
     if context.event.status in ("UNRESOLVED_LINK", "WITHDRAWN"):
         statuses.add(context.event.status)
     for receipt_no, report_name, digest in context.confounding_receipts:
@@ -320,7 +338,7 @@ def build_baseline_memo(context: ResearchContext) -> ResearchMemo:
     evidence.sort(key=lambda item: item.id)
     claims.sort(key=lambda item: (item.kind, item.metric_key or "", item.text))
     ordered_statuses = tuple(sorted(statuses))
-    manifest = _manifest_hash(context)
+    manifest = _manifest_hash(context, analogue_ref)
     return ResearchMemo(
         event_id=context.event.event_id,
         anchor_rcept_no=context.anchor_rcept_no,

@@ -87,6 +87,16 @@ class FilingVersion:
     time_precision: Literal["DATE_ONLY", "OBSERVED_INSTANT"]
 
 
+@dataclass(frozen=True, slots=True)
+class ResearchRunRecord:
+    """Immutable registered research run identity."""
+
+    run_id: str
+    manifest_hash: str
+    status: str
+    local_path: PurePosixPath
+
+
 class Catalog:
     """SQLite-backed durable identity for local artifacts and filing facts."""
 
@@ -455,6 +465,20 @@ class Catalog:
         except BaseException:
             self._abort_or_hold()
             raise
+
+    def get_research_run(self, run_id: str) -> ResearchRunRecord | None:
+        """Return the registered immutable run record, if present."""
+        row = self._conn.execute(
+            "SELECT manifest_hash, status, local_path FROM research_run WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return ResearchRunRecord(
+            run_id=run_id,
+            manifest_hash=str(row["manifest_hash"]),
+            status=str(row["status"]),
+            local_path=PurePosixPath(str(row["local_path"])),
+        )
 
     def references_to_hashes(self, hashes: frozenset[str]) -> Mapping[str, tuple[str, ...]]:
         """Return exact research-run identifiers that cite candidate hashes.

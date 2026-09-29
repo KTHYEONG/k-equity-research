@@ -20,9 +20,11 @@ from src.data.imports import ImportManifest, ImportPart
 from src.data.index_store import IndexManifest, IndexStore, load_index_manifest, merge_index_manifest
 from src.data.local_lake import LocalLake
 from src.data.local_paths import checked_data_path, checked_local_path
+from src.research.analogue_proof import build_analogue_proof
 from src.research.context import ResearchUnavailable, build_research_context
 from src.research.event_study import StudyPolicy
-from src.research.memo import build_baseline_memo, memo_to_dict, render_markdown
+from src.research.memo import build_baseline_memo
+from src.research.publication import proof_reference, publish_research_run
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -472,7 +474,13 @@ def run_daily_batch(
             withheld += 1
             failures.append(f"MEMO_WITHHELD:{anchor}")
             continue
-        baseline = build_baseline_memo(context)
+        proof = build_analogue_proof(context)
+        memo_run_id = f"{context.event.event_id}-{snapshot_id}"
+        relative_dir = PurePosixPath(f"reports/{context.event.event_id}/{memo_run_id}")
+        analogue_ref = (
+            proof_reference(data_root / relative_dir.as_posix(), proof) if proof is not None else None
+        )
+        baseline = build_baseline_memo(context, analogue_ref=analogue_ref)
         memo = baseline
         if agent_mode:
             if resolved_agent is None or resolved_policy is None:
@@ -484,35 +492,17 @@ def run_daily_batch(
                 if "AGENT_UNAVAILABLE" in memo.statuses or "AGENT_REJECTED" in memo.statuses:
                     failures.append(f"AGENT_FALLBACK:{anchor}")
         try:
-            payload_dict = memo_to_dict(memo)
-            memo_payload = (json.dumps(payload_dict, sort_keys=True, indent=2) + "\n").encode("utf-8")
-            markdown_payload = render_markdown(memo).encode("utf-8")
-        except (ValueError, TypeError, KeyError):
-            withheld += 1
-            failures.append(f"MEMO_INVALID:{anchor}")
-            continue
-        memo_run_id = f"{context.event.event_id}-{snapshot_id}"
-        relative_dir = PurePosixPath(f"reports/{context.event.event_id}/{memo_run_id}")
-        run_dir = data_root / relative_dir.as_posix()
-        try:
-            _atomic_write_bytes(data_root, run_dir / "memo.json", memo_payload)
-            _atomic_write_bytes(data_root, run_dir / "memo.md", markdown_payload)
             run_manifest = {
                 "batch_run_id": run_id,
                 "collection_snapshot_id": snapshot_id,
                 "event_id": context.event.event_id,
                 "index_manifest_hash": index_manifest.manifest_hash,
                 "manifest_hash": memo.manifest_hash,
-                "markdown_sha256": hashlib.sha256(markdown_payload).hexdigest(),
                 "memo_run_id": memo_run_id,
-                "memo_sha256": hashlib.sha256(memo_payload).hexdigest(),
+                "proof_sha256": proof.sha256 if proof is not None else None,
                 "run_id": snapshot_id,
             }
-            manifest_payload = (json.dumps(run_manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
-            _atomic_write_bytes(data_root, run_dir / "manifest.json", manifest_payload)
-            catalog.register_research_run(
-                memo_run_id, hashlib.sha256(manifest_payload).hexdigest(), "COMPLETE", relative_dir / "manifest.json"
-            )
+            publish_research_run(data_root, memo_run_id, memo, proof, run_manifest)
         except (ValueError, OSError):
             withheld += 1
             failures.append(f"PUBLISH_FAILED:{anchor}")

@@ -575,7 +575,6 @@ def _atomic_write_bytes(data_root: Path, target: Path, payload: bytes) -> None:
 
 
 def _run_research_memo(args: argparse.Namespace) -> int:
-    import hashlib
     from zoneinfo import ZoneInfo
 
     from src.data.event_store import EventStore
@@ -584,9 +583,11 @@ def _run_research_memo(args: argparse.Namespace) -> int:
     from src.data.index_store import IndexStore, load_index_manifest
     from src.data.local_lake import LocalLake
     from src.data.local_paths import checked_data_path, checked_local_path
+    from src.research.analogue_proof import build_analogue_proof
     from src.research.context import ResearchUnavailable, build_research_context
     from src.research.event_study import StudyPolicy
-    from src.research.memo import build_baseline_memo, memo_to_dict, render_markdown
+    from src.research.memo import build_baseline_memo
+    from src.research.publication import proof_reference, publish_research_run
 
     root = _resolve_data_root(args.data_root)
     catalog = open_catalog(root)
@@ -629,8 +630,13 @@ def _run_research_memo(args: argparse.Namespace) -> int:
     except ResearchUnavailable as exc:
         sys.stderr.write(f"unavailable: {exc.reason_code}\n")
         return 3
-    memo = build_baseline_memo(context)
-    markdown = render_markdown(memo)
+    proof = build_analogue_proof(context)
+    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
+    run_id = f"{context.active_rcept_no}-{stamp}"
+    relative_dir = PurePosixPath(f"reports/{context.event.event_id}/{run_id}")
+    run_dir = root / relative_dir.as_posix()
+    analogue_ref = proof_reference(run_dir, proof) if proof is not None else None
+    memo = build_baseline_memo(context, analogue_ref=analogue_ref)
     if args.agent:
         import httpx
 
@@ -646,36 +652,24 @@ def _run_research_memo(args: argparse.Namespace) -> int:
             memo = AgentRunner().run(context, memo, model_client, agent_policy)
         finally:
             http_client.close()
-        markdown = render_markdown(memo)
-    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
-    run_id = f"{context.active_rcept_no}-{stamp}"
-    relative_dir = PurePosixPath(f"reports/{context.event.event_id}/{run_id}")
-    run_dir = root / relative_dir.as_posix()
-    memo_payload = (json.dumps(memo_to_dict(memo), sort_keys=True, indent=2) + "\n").encode("utf-8")
-    markdown_payload = markdown.encode("utf-8")
-    _atomic_write_bytes(root, run_dir / "memo.json", memo_payload)
-    _atomic_write_bytes(root, run_dir / "memo.md", markdown_payload)
     run_manifest = {
         "event_id": context.event.event_id,
+        "index_manifest_hash": manifest.manifest_hash,
         "manifest_hash": memo.manifest_hash,
-        "memo_sha256": hashlib.sha256(memo_payload).hexdigest(),
-        "markdown_sha256": hashlib.sha256(markdown_payload).hexdigest(),
+        "proof_sha256": proof.sha256 if proof is not None else None,
         "run_id": run_id,
     }
-    manifest_payload = (json.dumps(run_manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
-    _atomic_write_bytes(root, run_dir / "manifest.json", manifest_payload)
-    catalog.register_research_run(
-        run_id, hashlib.sha256(manifest_payload).hexdigest(), "COMPLETE", relative_dir / "manifest.json"
-    )
+    published = publish_research_run(root, run_id, memo, proof, run_manifest)
     sys.stdout.write(
         json.dumps(
             {
                 "anchor_rcept_no": context.anchor_rcept_no,
                 "active_rcept_no": context.active_rcept_no,
-                "manifest_hash": memo.manifest_hash,
-                "markdown": str(run_dir / "memo.md"),
+                "analogue_proof": proof.sha256 if proof is not None else None,
+                "manifest_hash": published.memo.manifest_hash,
+                "markdown": str(root / published.report_dir.as_posix() / "memo.md"),
                 "materiality": context.materiality.status,
-                "memo": str(run_dir / "memo.json"),
+                "memo": str(root / published.report_dir.as_posix() / "memo.json"),
                 "run_id": run_id,
                 "study": context.study.status,
                 "comparables": context.comparables.status,

@@ -200,6 +200,8 @@ def test_rich_tool_metrics_cover_uncertainty_branches() -> None:
     """CAR, analogue quantiles and mixed study reasons render with explicit statuses."""
     import dataclasses
 
+    from src.research.memo import EvidenceRef
+
     base = _context()
     text_fact = BuybackFact(
         "ACQ_PPS", None, "purpose", None, _location("20240620000001", "ACQ_PPS"), "VERIFIED"
@@ -218,7 +220,10 @@ def test_rich_tool_metrics_cover_uncertainty_branches() -> None:
     )
     event = EventLink(base.event.event_id, base.event.rcept_nos, "UNRESOLVED_LINK")
     context = dataclasses.replace(base, parsed=parsed, study=study, comparables=comparables, event=event)
-    memo = build_baseline_memo(context)
+    analogue_ref = EvidenceRef(
+        "tool-analogues", "tool_result", PurePosixPath("reports/evt/run-1/analogue-proof.json"), "ab" * 32, "proof"
+    )
+    memo = build_baseline_memo(context, analogue_ref=analogue_ref)
     assert memo.facts["purpose_text"] == "purpose"
     assert memo.facts["daily_limit_shares"] is None
     assert memo.metrics["car_h1"] == "0.03"
@@ -250,3 +255,113 @@ def test_empty_memo_renders_withheld_sections() -> None:
     assert "no verified claim" in markdown
     assert "no resolvable source" in markdown
     assert "- OK" in markdown
+
+
+def _proved_context() -> ResearchContext:
+    """Context with five paired analogue observations backed by local test hashes."""
+    import dataclasses
+
+    from src.research.comparables import AnalogueObservation
+
+    base = _context()
+    observations = tuple(
+        AnalogueObservation(
+            f"EVT:{number:04d}",
+            date(2024, 6, 10),
+            datetime(2024, 6, 20, 18, 0, tzinfo=KST),
+            Decimal(f"0.0{number}"),
+            (format(number, "064x"), format(number + 1000, "064x")),
+        )
+        for number in range(1, 6)
+    )
+    hashes = sorted({digest for observation in observations for digest in observation.source_hashes})
+    comparables = dataclasses.replace(
+        base.comparables,
+        analogue_event_ids=tuple(observation.event_id for observation in observations),
+        analogue_intraday_excess=tuple(observation.intraday_excess for observation in observations),
+        analogue_quantiles={"p25": Decimal("0.02"), "median": Decimal("0.03"), "p75": Decimal("0.04")},
+        exclusions={},
+        status="OK",
+        analogue_observations=observations,
+        selection_source_hashes=tuple(hashes),
+    )
+    paths = {digest: PurePosixPath(f"raw/test/{digest[:8]}.bin") for digest in hashes}
+    paths[DOC_HASH] = ZIP_PATH
+    paths[RAW_HASH] = ZIP_PATH
+    return dataclasses.replace(
+        base, comparables=comparables, index_manifest_hash="ab" * 32, artifact_paths=paths
+    )
+
+
+def test_verified_proof_citation_keeps_quantiles() -> None:
+    """With verified proof, tool-analogues names the run-local proof with identical quantiles."""
+    from pathlib import Path
+
+    from src.research.analogue_proof import build_analogue_proof
+    from src.research.publication import proof_reference
+
+    context = _proved_context()
+    proof = build_analogue_proof(context)
+    assert proof is not None
+    ref = proof_reference(Path("reports/evt/run-1"), proof)
+    memo = build_baseline_memo(context, analogue_ref=ref)
+    by_id = {item.id: item for item in memo.evidence}
+    assert by_id["tool-analogues"].local_relative_path == ref.local_relative_path
+    assert by_id["tool-analogues"].sha256 == proof.sha256
+    assert memo.metrics["analogue_p25"] == "0.02"
+    assert memo.metrics["analogue_median"] == "0.03"
+    assert memo.metrics["analogue_p75"] == "0.04"
+    assert any(claim.evidence_ids == ("tool-analogues",) for claim in memo.claims)
+
+
+def test_absent_proof_withholds_analogue_claim() -> None:
+    """Without proof no analogue claim or quantile is emitted and the status is explicit."""
+    memo = build_baseline_memo(_proved_context())
+    assert memo.metrics["analogue_p25"] is None
+    assert memo.metrics["analogue_median"] is None
+    assert memo.metrics["analogue_p75"] is None
+    assert "tool-analogues" not in {item.id for item in memo.evidence}
+    assert all("tool-analogues" not in claim.evidence_ids for claim in memo.claims)
+    assert "ANALOGUE_EVIDENCE_UNVERIFIED" in memo.statuses
+    assert memo.facts["planned_amount_krw"] == "1000000000"
+
+
+def test_proof_digest_change_shifts_manifest() -> None:
+    """Changing only the proof digest changes the memo manifest hash."""
+    from src.research.memo import EvidenceRef
+
+    context = _proved_context()
+    first = build_baseline_memo(
+        context,
+        analogue_ref=EvidenceRef(
+            "tool-analogues", "tool_result", PurePosixPath("reports/evt/run-1/analogue-proof.json"),
+            "ab" * 32, "proof",
+        ),
+    )
+    second = build_baseline_memo(
+        context,
+        analogue_ref=EvidenceRef(
+            "tool-analogues", "tool_result", PurePosixPath("reports/evt/run-1/analogue-proof.json"),
+            "cd" * 32, "proof",
+        ),
+    )
+    assert first.manifest_hash != second.manifest_hash
+    assert build_baseline_memo(context).manifest_hash != first.manifest_hash
+
+
+def test_unresolvable_tool_hash_withholds_claim_keeps_metric() -> None:
+    """A tool metric without a catalog path keeps its value but emits no citation."""
+    import dataclasses
+
+    base = _context()
+    materiality = dataclasses.replace(base.materiality, source_hashes=("ff" * 32,))
+    study = dataclasses.replace(base.study, horizon_car={1: Decimal("0.03")})
+    paths = dict(base.artifact_paths)
+    paths["s" * 64] = ZIP_PATH
+    context = dataclasses.replace(base, materiality=materiality, study=study, artifact_paths=paths)
+    memo = build_baseline_memo(context)
+    assert memo.metrics["amount_to_market_cap"] is not None
+    assert "tool-materiality" not in {item.id for item in memo.evidence}
+    assert all(claim.metric_key != "amount_to_market_cap" for claim in memo.claims)
+    assert "tool-intraday-s0" in {item.id for item in memo.evidence}
+    assert "tool-car-h1" in {item.id for item in memo.evidence}
