@@ -525,3 +525,77 @@ def test_unresolvable_company_name_falls_back_to_stock_code() -> None:
     assert memo.facts["company_name"] is None
     assert all(item.id != "security-master" for item in memo.evidence)
     assert render_markdown(memo).splitlines()[0].startswith("# Buyback memo: 000001 (000001,")
+
+
+def _display_memo() -> object:
+    from src.research.memo import ResearchMemo
+
+    return ResearchMemo(
+        event_id="buyback:01386916:20240620000001",
+        anchor_rcept_no="20240620000001",
+        active_rcept_no="20240620000001",
+        as_of=AS_OF,
+        facts={
+            "planned_amount_krw": "2999920000",
+            "planned_shares": "10000",
+            "daily_limit_shares": None,
+            "fin_assets": "10000000000",
+            "fin_cash": "11468450971",
+            "fin_equity": "8000000000",
+            "fin_liabilities": "2000000000",
+            "receipt_date": "2024-06-20",
+            "period_begin": "2024-06-21",
+            "period_end": "2024-09-20",
+        },
+        metrics={
+            "amount_to_cash": "0.2615802262734371504861186017",
+            "amount_to_equity": "0.125",
+            "analogue_median": None,
+            "analogue_p25": "0.01",
+            "analogue_p75": "0.03",
+            "car_h1": "0.03",
+            "model_alpha": "0.001",
+            "model_beta": "0.9",
+            "peer_count": "8",
+        },
+        claims=(),
+        evidence=(),
+        statuses=(),
+        manifest_hash="0" * 64,
+    )
+
+
+def test_display_matches_rendered_summary() -> None:
+    from src.research.memo import display_figures
+
+    memo = _display_memo()  # type: ignore[arg-type]
+    figures = display_figures(memo)
+    assert figures["metric:amount_to_cash"] == "26.16%"
+    assert "26.16%" in render_markdown(memo)  # type: ignore[arg-type]
+    assert list(figures.keys()) == sorted(figures.keys())
+
+
+def test_display_withheld_and_estimation_excluded() -> None:
+    from src.research.memo import display_figures
+
+    memo = _display_memo()  # type: ignore[arg-type]
+    figures = display_figures(memo)
+    assert "metric:analogue_median" not in figures
+    assert "metric:model_alpha" not in figures
+    assert "metric:model_beta" not in figures
+    assert figures["metric:analogue_p25"] == "+1.00%"
+    assert figures["metric:peer_count"] == "8"
+
+
+def test_display_krw_scale_and_determinism() -> None:
+    from src.research.memo import display_figures
+
+    memo = _display_memo()  # type: ignore[arg-type]
+    figures = display_figures(memo)
+    assert figures["fact:fin_cash"] == "114.7억원"
+    assert figures["fact:planned_amount_krw"] == "30.0억원"
+    assert figures["fact:receipt_date"] == "2024-06-20"
+    assert "fact:daily_limit_shares" not in figures
+    again = display_figures(memo)
+    assert figures == again
+    assert list(figures.keys()) == list(again.keys())

@@ -7,7 +7,7 @@ import json
 import resource
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -25,7 +25,7 @@ from src.research.event_study import StudyPolicy
 from src.research.memo import build_baseline_memo
 from src.research.publication import proof_reference, validate_memo_evidence
 
-CODE_REVISION = "eval-replay-v1"
+CODE_REVISION = "eval-replay-v2"
 _HOLDOUT_YEAR = 2026
 _CHUNK_SIZE = 1024 * 1024
 
@@ -59,6 +59,9 @@ class ReplayResult:
     status: str
     elapsed_ms: int
     peak_rss_mib: float
+    agent_status: str = ""
+    agent_reason: str = ""
+    agent_claim_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,13 @@ class EvaluationReport:
     latency_ms: float
     peak_rss_mib: float
     source_manifest_hashes: tuple[str, ...]
+    agent_ok_num: int = 0
+    agent_rejected_num: int = 0
+    agent_unavailable_num: int = 0
+    agent_den: int = 0
+    agent_reason_counts: Mapping[str, int] = field(default_factory=dict)
+    agent_claims_per_ok: float = 0.0
+    agent_model_id: str = ""
 
 
 def _sha256_of(path: Path) -> str:
@@ -168,6 +178,21 @@ def _empty_result(case_id: str, status: str, started: float) -> ReplayResult:
     return ReplayResult(case_id, "", 0, 0, 0, 0, False, status, _elapsed_ms(started), _peak_rss_mib())
 
 
+def _agent_outcome(statuses: Sequence[str]) -> tuple[str, str]:
+    reason = ""
+    for status in statuses:
+        if status.startswith("AGENT_REASON:"):
+            reason = status.split(":", 1)[1]
+            break
+    if "AGENT_OK" in statuses:
+        return "AGENT_OK", ""
+    if "AGENT_REJECTED" in statuses:
+        return "AGENT_REJECTED", reason
+    if "AGENT_UNAVAILABLE" in statuses:
+        return "AGENT_UNAVAILABLE", reason
+    return "", ""
+
+
 def _replay(
     case: ReplayCase,
     data_root: Path,
@@ -215,9 +240,12 @@ def _replay(
     if model is not None and agent_policy is not None:
         memo = AgentRunner().run(context, baseline, model, agent_policy)
         tool_valid = "AGENT_REJECTED" not in memo.statuses
+        agent_status, agent_reason = _agent_outcome(memo.statuses)
+        agent_claim_count = len(memo.claims) - len(baseline.claims)
     else:
         memo = baseline
         tool_valid = True
+        agent_status, agent_reason, agent_claim_count = "", "", 0
     leak = _detect_future_leak(context, case)
     fact_matches = 0
     fact_errors = 0
@@ -247,6 +275,9 @@ def _replay(
             status,
             _elapsed_ms(started),
             _peak_rss_mib(),
+            agent_status,
+            agent_reason,
+            agent_claim_count,
         ),
         memo.event_id,
     )
@@ -269,7 +300,10 @@ def evaluate_cases(
     model: LocalModelClient | None = None,
     agent_policy: AgentPolicy | None = None,
 ) -> EvaluationReport:
-    """Aggregate overall and stratified quality with explicit denominators, coverage and refusal rates. Keep 2026 holdout events and all versions of one event outside 2024-2025 development cohorts."""
+    """Aggregate overall and stratified quality with explicit denominators, coverage and refusal rates. Keep 2026 holdout events and all versions of one event outside 2024-2025 development cohorts.
+
+    When a model is supplied the report separates narrative outcomes (`AGENT_OK`, `AGENT_REJECTED`, `AGENT_UNAVAILABLE`) and rejection reasons from tool validity, and the run identity includes the model id.
+    """
     replayed = [_replay(case, data_root, model, agent_policy) for case in cases]
     results = [result for result, _ in replayed]
     by_event: dict[str, list[int]] = {}
@@ -294,9 +328,22 @@ def evaluate_cases(
     known = [index for index, item in enumerate(replayed) if item[1] is not None]
     tool_num = sum(1 for index in known if results[index].tool_valid)
     refusal_num = sum(1 for result in results if result.status == "REFUSED")
+    agent_results = [result for result in results if result.agent_status]
+    agent_ok_num = sum(1 for result in agent_results if result.agent_status == "AGENT_OK")
+    agent_rejected_num = sum(1 for result in agent_results if result.agent_status == "AGENT_REJECTED")
+    agent_unavailable_num = sum(1 for result in agent_results if result.agent_status == "AGENT_UNAVAILABLE")
+    agent_den = len(agent_results)
+    reason_counts: dict[str, int] = {}
+    for result in agent_results:
+        if result.agent_reason:
+            reason_counts[result.agent_reason] = reason_counts.get(result.agent_reason, 0) + 1
+    ok_claims = sum(result.agent_claim_count for result in agent_results if result.agent_status == "AGENT_OK")
+    agent_claims_per_ok = ok_claims / agent_ok_num if agent_ok_num else 0.0
+    agent_model_id = agent_policy.model_id if model is not None and agent_policy is not None else ""
     source_manifest_hashes = _source_manifest_hashes(data_root, cases)
     fingerprint = {
         "agent": agent_policy.prompt_version if model is not None and agent_policy is not None else "baseline",
+        "model_id": agent_model_id,
         "cases": sorted(
             (case.case_id, case.rcept_no, case.as_of.isoformat(), case.snapshot_id, case.index_manifest_hash)
             for case in cases
@@ -332,6 +379,13 @@ def evaluate_cases(
         latency_ms=latency_ms,
         peak_rss_mib=peak_rss_mib,
         source_manifest_hashes=source_manifest_hashes,
+        agent_ok_num=agent_ok_num,
+        agent_rejected_num=agent_rejected_num,
+        agent_unavailable_num=agent_unavailable_num,
+        agent_den=agent_den,
+        agent_reason_counts=dict(sorted(reason_counts.items())),
+        agent_claims_per_ok=agent_claims_per_ok,
+        agent_model_id=agent_model_id,
     )
 
 
@@ -376,6 +430,13 @@ def load_cases(path: Path) -> tuple[ReplayCase, ...]:
 def report_to_dict(report: EvaluationReport) -> dict[str, object]:
     """Return a stable JSON-ready mapping for one evaluation report with exact denominators."""
     return {
+        "agent_claims_per_ok": report.agent_claims_per_ok,
+        "agent_den": report.agent_den,
+        "agent_model_id": report.agent_model_id,
+        "agent_ok_num": report.agent_ok_num,
+        "agent_reason_counts": {key: report.agent_reason_counts[key] for key in sorted(report.agent_reason_counts)},
+        "agent_rejected_num": report.agent_rejected_num,
+        "agent_unavailable_num": report.agent_unavailable_num,
         "case_count": report.case_count,
         "citation_precision": report.citation_precision,
         "citation_precision_den": report.citation_precision_den,
@@ -426,6 +487,22 @@ def render_report_markdown(report: EvaluationReport) -> str:
             f"- tool_valid_rate: {report.tool_valid_rate} ({report.tool_valid_num}/{report.tool_valid_den})",
             f"- future_leak_count: {report.future_leak_count}",
             f"- refusal_rate: {report.refusal_rate} ({report.refusal_num}/{report.refusal_den})",
+            "",
+            "## Agent",
+            "",
+            f"- model_id: {report.agent_model_id or 'none'}",
+            f"- agent_ok: {report.agent_ok_num}/{report.agent_den}",
+            f"- agent_rejected: {report.agent_rejected_num}/{report.agent_den}",
+            f"- agent_unavailable: {report.agent_unavailable_num}/{report.agent_den}",
+            f"- agent_claims_per_ok: {report.agent_claims_per_ok}",
+            (
+                "- agent_reasons: none"
+                if not report.agent_reason_counts
+                else "- agent_reasons:\n"
+                + "\n".join(
+                    f"  - {key}: {report.agent_reason_counts[key]}" for key in sorted(report.agent_reason_counts)
+                )
+            ),
             "",
             "## Resources",
             "",

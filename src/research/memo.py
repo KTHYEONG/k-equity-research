@@ -525,6 +525,39 @@ def _display_fact(key: str, raw: str | None) -> str:
     return _krw(value) if key in _KRW_FACTS else f"{value:,.0f}"
 
 
+_DISPLAY_NUMERIC_FACTS = ("planned_amount_krw", "planned_shares", "daily_limit_shares", "fin_assets", "fin_cash", "fin_equity", "fin_liabilities")
+_DISPLAY_DATE_FACTS = ("receipt_date", "period_begin", "period_end")
+_EXCLUDED_DISPLAY_METRICS = frozenset({"model_alpha", "model_beta"})
+
+
+def display_figures(memo: ResearchMemo) -> Mapping[str, str]:
+    """Return reader-facing display strings for the numeric and date figures of a memo, keyed `fact:<key>` or `metric:<key>`.
+
+    Uses the same formatters as `render_markdown`, so a figure shown to a reader and a figure offered to the local model are
+    identical. Withheld (None) values and estimation-window parameters (`model_alpha`, `model_beta`) are omitted. No figure is
+    recomputed; exact decimals stay in the structured memo.
+    """
+    entries: dict[str, str] = {}
+    for key in _DISPLAY_NUMERIC_FACTS:
+        raw = memo.facts.get(key)
+        if raw is None:
+            continue
+        entries[f"fact:{key}"] = _display_fact(key, raw)
+    for key in _DISPLAY_DATE_FACTS:
+        raw = memo.facts.get(key)
+        if raw is None:
+            continue
+        entries[f"fact:{key}"] = raw
+    for key in sorted(memo.metrics):
+        if key in _EXCLUDED_DISPLAY_METRICS:
+            continue
+        raw = memo.metrics.get(key)
+        if raw is None:
+            continue
+        entries[f"metric:{key}"] = _display_metric(key, raw)
+    return dict(sorted(entries.items()))
+
+
 def _concurrent_lines(memo: ResearchMemo) -> list[str]:
     entries: list[tuple[str, str]] = []
     for claim in memo.claims:
@@ -627,4 +660,4 @@ def render_markdown(memo: ResearchMemo) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["CODE_REVISION", "EvidenceRef", "MemoClaim", "ResearchMemo", "build_baseline_memo", "memo_to_dict", "render_markdown"]
+__all__ = ["CODE_REVISION", "EvidenceRef", "MemoClaim", "ResearchMemo", "build_baseline_memo", "display_figures", "memo_to_dict", "render_markdown"]

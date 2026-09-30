@@ -197,3 +197,40 @@ def test_malformed_window_arguments_rejected() -> None:
         execute_tool(ToolRequest("get_market_window", {"start": "2024-06-22", "end": "2024-06-21"}), _context())
     with pytest.raises(ValueError, match="isoformat"):
         execute_tool(ToolRequest("get_market_window", {"start": "someday", "end": "2024-06-21"}), _context())
+
+
+def test_tool_specs_match_executable_contract() -> None:
+    """Each tool with exactly its required arguments executes without unknown-argument errors."""
+    from src.agent.tools import TOOL_SPECS
+
+    context = _context()
+    for name, spec in TOOL_SPECS.items():
+        arguments = {arg.name: "2024-06-20" if arg.kind == "iso_date" else "assets" for arg in spec.args if arg.required}
+        result = execute_tool(ToolRequest(name, arguments), context)  # type: ignore[arg-type]
+        assert result.name == name
+        with pytest.raises(ValueError, match="unknown argument"):
+            execute_tool(ToolRequest(name, {**arguments, "unexpected": "x"}), context)  # type: ignore[arg-type]
+
+
+def test_tool_set_is_closed() -> None:
+    """TOOL_SPECS keys equal the six ToolName literal values exactly."""
+    from src.agent.tools import TOOL_SPECS, ToolName
+    from typing import get_args
+
+    assert tuple(TOOL_SPECS.keys()) == get_args(ToolName)
+
+
+def test_zero_argument_tools_stay_zero_argument() -> None:
+    """Zero-argument tools declare no args and reject any argument."""
+    from src.agent.tools import TOOL_SPECS
+
+    for name in ("get_event", "get_peers", "get_analogues", "get_revision_diff"):
+        assert TOOL_SPECS[name].args == ()  # type: ignore[literal-required]
+        with pytest.raises(ValueError, match="unknown argument"):
+            execute_tool(ToolRequest(name, {"event_id": "00127255"}), _context())  # type: ignore[arg-type]
+
+
+def test_required_arguments_enforced() -> None:
+    """get_market_window with start only requires both bounds."""
+    with pytest.raises(ValueError, match="requires start and end"):
+        execute_tool(ToolRequest("get_market_window", {"start": "2024-06-20"}), _context())

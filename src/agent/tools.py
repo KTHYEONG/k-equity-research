@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Literal
+from typing import Final, Literal
 
 from src.research.context import ResearchContext
 
@@ -18,13 +18,46 @@ ToolName = Literal[
     "get_revision_diff",
 ]
 
+ToolArgKind = Literal["text", "iso_date"]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolArg:
+    """One declared argument of a bounded read tool."""
+
+    name: str
+    kind: ToolArgKind
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """Signature and one-sentence description of a bounded read tool."""
+
+    description: str
+    args: tuple[ToolArg, ...]
+
+
+TOOL_SPECS: Final[Mapping[ToolName, ToolSpec]] = {
+    "get_event": ToolSpec("Returns the linked event identity and receipt numbers at the fixed as_of instant.", ()),
+    "get_financial_asof": ToolSpec(
+        "Returns verified financial facts at the fixed as_of instant, optionally filtered to one fact name.",
+        (ToolArg("fact", "text", False),),
+    ),
+    "get_market_window": ToolSpec(
+        "Returns stock and index sessions within the given start and end dates, which must not be after as_of.",
+        (ToolArg("start", "iso_date", True), ToolArg("end", "iso_date", True)),
+    ),
+    "get_peers": ToolSpec("Returns the validated peer instrument selection.", ()),
+    "get_analogues": ToolSpec("Returns the validated analogue events and their outcome distribution.", ()),
+    "get_revision_diff": ToolSpec(
+        "Returns parsed buyback facts across the linked original and correction receipts.", ()
+    ),
+}
+"""Single source of truth for the signature of every bounded read tool. The local-model prompt, the constrained-decoding schema and argument validation all derive from it, so a tool cannot be offered to the model with arguments `execute_tool` rejects."""
+
 _ALLOWED_ARGS: dict[str, frozenset[str]] = {
-    "get_event": frozenset(),
-    "get_financial_asof": frozenset({"fact"}),
-    "get_market_window": frozenset({"start", "end"}),
-    "get_peers": frozenset(),
-    "get_analogues": frozenset(),
-    "get_revision_diff": frozenset(),
+    name: frozenset(arg.name for arg in spec.args) for name, spec in TOOL_SPECS.items()
 }
 
 
@@ -177,4 +210,4 @@ def execute_tool(request: ToolRequest, context: ResearchContext) -> ToolResult:
     return ToolResult(name=request.name, payload=payload, evidence_ids=evidence, as_of=context.as_of)
 
 
-__all__ = ["ToolName", "ToolRequest", "ToolResult", "execute_tool"]
+__all__ = ["TOOL_SPECS", "ToolArg", "ToolArgKind", "ToolName", "ToolRequest", "ToolResult", "ToolSpec", "execute_tool"]

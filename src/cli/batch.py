@@ -11,7 +11,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.agent.workflow import AgentPolicy, AgentRunner, LocalModelClient
+from src.agent.local_model import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_TIMEOUT_SECONDS
+from src.agent.workflow import AGENT_SCHEMAS, DEFAULT_PROMPT_VERSION, AgentPolicy, AgentRunner, LocalModelClient
 from src.core.buyback_document import DocumentLimits
 from src.data.catalog import Catalog
 from src.data.event_store import EventStore
@@ -267,9 +268,11 @@ def _try_agent_clients() -> tuple[LocalModelClient | None, AgentPolicy | None]:
 
         from src.agent.local_model import LlamaCppClient
 
-        model_name = _os.environ.get("AGENT_MODEL", "local-7b-q4")
-        client: LocalModelClient = LlamaCppClient(base_url, model_name, 30.0, httpx.Client())
-        return client, AgentPolicy(3, 30.0, "v1")
+        model_name = _os.environ.get("AGENT_MODEL", DEFAULT_AGENT_MODEL)
+        client: LocalModelClient = LlamaCppClient(
+            base_url, model_name, DEFAULT_AGENT_TIMEOUT_SECONDS, httpx.Client(), schemas=AGENT_SCHEMAS
+        )
+        return client, AgentPolicy(3, DEFAULT_AGENT_TIMEOUT_SECONDS, DEFAULT_PROMPT_VERSION, model_id=model_name)
     except ValueError:
         return None, None
 
@@ -485,7 +488,7 @@ def run_daily_batch(
         memo = baseline
         if agent_mode:
             if resolved_agent is None or resolved_policy is None:
-                memo = _agent_fallback_statuses(baseline, "v1", (), "AGENT_UNAVAILABLE")
+                memo = _agent_fallback_statuses(baseline, DEFAULT_PROMPT_VERSION, (), "AGENT_UNAVAILABLE")
                 if f"AGENT_UNAVAILABLE:{anchor}" not in failures:
                     failures.append(f"AGENT_UNAVAILABLE:{anchor}")
             else:

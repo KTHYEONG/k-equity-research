@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 
+from src.agent.local_model import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_TIMEOUT_SECONDS
+from src.agent.workflow import DEFAULT_PROMPT_VERSION
 from src.data.catalog import Catalog
 from src.data.drive_stage import ArchiveLimits, stage_drive_file, stage_selected_tar_members
 from src.data.imports import import_dataset, import_financial_evidence
@@ -114,10 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback."
     )
     memo.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
-    memo.add_argument("--agent-model", default="local-7b-q4")
-    memo.add_argument("--agent-timeout-seconds", type=float, default=30.0)
+    memo.add_argument("--agent-model", default=DEFAULT_AGENT_MODEL)
+    memo.add_argument("--agent-timeout-seconds", type=float, default=DEFAULT_AGENT_TIMEOUT_SECONDS)
     memo.add_argument("--agent-max-calls", type=int, default=3)
-    memo.add_argument("--agent-prompt-version", default="v1")
+    memo.add_argument("--agent-prompt-version", default=DEFAULT_PROMPT_VERSION)
     _add_data_root(memo)
     aggregate = research_sub.add_parser("aggregate", help="Summarize event-study outcomes across all linked events.")
     aggregate.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2026-09-29T18:32:00+09:00.")
@@ -140,10 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent", action="store_true", help="Replay with the local model; baseline stays the fallback."
     )
     replay.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
-    replay.add_argument("--agent-model", default="local-7b-q4")
-    replay.add_argument("--agent-timeout-seconds", type=float, default=30.0)
+    replay.add_argument("--agent-model", default=DEFAULT_AGENT_MODEL)
+    replay.add_argument("--agent-timeout-seconds", type=float, default=DEFAULT_AGENT_TIMEOUT_SECONDS)
     replay.add_argument("--agent-max-calls", type=int, default=3)
-    replay.add_argument("--agent-prompt-version", default="v1")
+    replay.add_argument("--agent-prompt-version", default=DEFAULT_PROMPT_VERSION)
     _add_data_root(replay)
     batch = subparsers.add_parser("batch", help="Recoverable daily batch operations.")
     batch_sub = batch.add_subparsers(dest="batch_command", required=True)
@@ -158,10 +160,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent", action="store_true", help="Draft narrative with the local model; baseline stays the fallback."
     )
     daily.add_argument("--agent-base-url", default="http://127.0.0.1:8080")
-    daily.add_argument("--agent-model", default="local-7b-q4")
-    daily.add_argument("--agent-timeout-seconds", type=float, default=30.0)
+    daily.add_argument("--agent-model", default=DEFAULT_AGENT_MODEL)
+    daily.add_argument("--agent-timeout-seconds", type=float, default=DEFAULT_AGENT_TIMEOUT_SECONDS)
     daily.add_argument("--agent-max-calls", type=int, default=3)
-    daily.add_argument("--agent-prompt-version", default="v1")
+    daily.add_argument("--agent-prompt-version", default=DEFAULT_PROMPT_VERSION)
     _add_data_root(daily)
     return parser
 
@@ -654,14 +656,18 @@ def _run_research_memo(args: argparse.Namespace) -> int:
         import httpx
 
         from src.agent.local_model import LlamaCppClient
-        from src.agent.workflow import AgentPolicy, AgentRunner
+        from src.agent.workflow import AGENT_SCHEMAS, AgentPolicy, AgentRunner
 
         http_client = httpx.Client()
         try:
             model_client = LlamaCppClient(
-                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client
+                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client,
+                schemas=AGENT_SCHEMAS,
             )
-            agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
+            agent_policy = AgentPolicy(
+                args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version,
+                model_id=args.agent_model,
+            )
             memo = AgentRunner().run(context, memo, model_client, agent_policy)
         finally:
             http_client.close()
@@ -796,14 +802,18 @@ def _run_eval_replay(args: argparse.Namespace) -> int:
         import httpx
 
         from src.agent.local_model import LlamaCppClient
-        from src.agent.workflow import AgentPolicy
+        from src.agent.workflow import AGENT_SCHEMAS, AgentPolicy
 
         http_client = httpx.Client()
         try:
             model_client = LlamaCppClient(
-                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client
+                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client,
+                schemas=AGENT_SCHEMAS,
             )
-            agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
+            agent_policy = AgentPolicy(
+                args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version,
+                model_id=args.agent_model,
+            )
             report = evaluate_cases(cases, root, model_client, agent_policy)
         finally:
             http_client.close()
@@ -817,6 +827,9 @@ def _run_eval_replay(args: argparse.Namespace) -> int:
     sys.stdout.write(
         json.dumps(
             {
+                "agent_den": report.agent_den,
+                "agent_model_id": report.agent_model_id,
+                "agent_ok_num": report.agent_ok_num,
                 "case_count": report.case_count,
                 "markdown": str(run_dir / "report.md"),
                 "report": str(run_dir / "report.json"),
@@ -855,14 +868,18 @@ def _run_batch_daily(args: argparse.Namespace) -> int:
         import httpx
 
         from src.agent.local_model import LlamaCppClient
-        from src.agent.workflow import AgentPolicy
+        from src.agent.workflow import AGENT_SCHEMAS, AgentPolicy
 
         http_client = httpx.Client()
         try:
             model_client = LlamaCppClient(
-                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client
+                args.agent_base_url, args.agent_model, args.agent_timeout_seconds, http_client,
+                schemas=AGENT_SCHEMAS,
             )
-            agent_policy = AgentPolicy(args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version)
+            agent_policy = AgentPolicy(
+                args.agent_max_calls, args.agent_timeout_seconds, args.agent_prompt_version,
+                model_id=args.agent_model,
+            )
             summary = run_daily_batch(
                 batch_policy,
                 project_data_root,

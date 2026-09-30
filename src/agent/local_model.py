@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Final
 from urllib.parse import urlparse
 
 import httpx
+
+DEFAULT_AGENT_MODEL: Final[str] = "gemma-4-12b-qat"
+DEFAULT_AGENT_TIMEOUT_SECONDS: Final[float] = 60.0
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -28,6 +32,8 @@ class LlamaCppClient:
     model: str
     timeout_seconds: float
     http_client: httpx.Client
+    schemas: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    max_tokens: int = 1024
 
     def __post_init__(self) -> None:
         if not _is_loopback(self.base_url):
@@ -36,14 +42,32 @@ class LlamaCppClient:
             raise ValueError("model name must be non-empty")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout must be positive")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
 
     def generate_json(self, messages: Sequence[Mapping[str, str]], schema_name: str) -> Mapping[str, object]:
-        """Request one structured response from a locally hosted llama.cpp model and return parsed JSON. Reject nonlocal endpoints, timeout, invalid JSON and schema transport failure so the baseline can remain the safe fallback."""
+        """Request one structured response from a locally hosted llama.cpp model and return parsed JSON. Reject nonlocal endpoints, timeout, invalid JSON and schema transport failure so the baseline can remain the safe fallback.
+
+        When `schemas` holds an entry for `schema_name` the request uses grammar-constrained `json_schema` decoding with that schema; otherwise it falls back to `json_object`. Decoding is greedy (temperature 0) and bounded by `max_tokens`.
+        """
         url = self.base_url.rstrip("/") + "/v1/chat/completions"
+        if schema_name in self.schemas:
+            response_format: dict[str, object] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": dict(self.schemas[schema_name]),
+                },
+            }
+        else:
+            response_format = {"type": "json_object"}
         payload = {
             "messages": [{"content": item["content"], "role": item["role"]} for item in messages],
             "model": self.model,
-            "response_format": {"type": "json_object"},
+            "temperature": 0,
+            "max_tokens": self.max_tokens,
+            "response_format": response_format,
         }
         try:
             response = self.http_client.post(url, json=payload, timeout=self.timeout_seconds)
@@ -64,4 +88,4 @@ class LlamaCppClient:
         return parsed
 
 
-__all__ = ["LlamaCppClient"]
+__all__ = ["DEFAULT_AGENT_MODEL", "DEFAULT_AGENT_TIMEOUT_SECONDS", "LlamaCppClient"]

@@ -701,8 +701,10 @@ def test_agent_run_marks_tool_outcome(tmp_path: Path) -> None:
 
     class _QuietModel:
         def generate_json(self, messages: object, schema_name: str) -> dict[str, object]:
-            del messages, schema_name
-            return {"tool_calls": [], "claims": []}
+            del messages
+            if schema_name == "tool_plan":
+                return {"tool_calls": []}
+            return {"claims": []}
 
     policy = AgentPolicy(max_tool_calls=3, model_timeout_seconds=5.0, prompt_version="v1")
     result = replay_case(_case(data_root, hashes=(dart_hash,)), data_root, _QuietModel(), policy)  # type: ignore[arg-type]
@@ -721,3 +723,238 @@ def test_stale_memo_bytes_fail_evidence_validation(tmp_path: Path) -> None:
     result = replay_case(_case(data_root, hashes=()), data_root)
     assert result.status == "SOURCE_CHANGED"
     assert result.manifest_hash == ""
+
+
+def _first_evidence(messages: object) -> str:
+    assert isinstance(messages, list)
+    for item in messages:
+        assert isinstance(item, dict)
+        for line in str(item.get("content", "")).splitlines():
+            if line.startswith("evidence="):
+                ids = line.split("=", 1)[1]
+                if ids:
+                    return ids.split(",")[0]
+    raise AssertionError("prompt carries no evidence ids")
+
+
+class _OutcomeModel:
+    """Fake agent model replaying one narrative outcome per case; plans stay empty."""
+
+    def __init__(self, narratives: list[object]) -> None:
+        self._narratives = list(narratives)
+
+    def generate_json(self, messages: object, schema_name: str) -> dict[str, object]:
+        if schema_name == "tool_plan":
+            return {"tool_calls": []}
+        outcome = self._narratives.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        assert isinstance(outcome, dict)
+        if outcome.get("kind") == "ok":
+            evidence = _first_evidence(messages)
+            return {
+                "claims": [
+                    {"evidence_ids": [evidence], "kind": "narrative", "metric_key": None, "text": "관측된 움직임이 기록됨."}
+                    for _ in range(int(outcome.get("count", 1)))
+                ]
+            }
+        return {
+            "claims": [
+                {
+                    "evidence_ids": [_first_evidence(messages)],
+                    "kind": "narrative",
+                    "metric_key": None,
+                    "text": "관측된 움직임은 999999.",
+                }
+            ]
+        }
+
+
+def _agent_policy(model_id: str = "test-model") -> AgentPolicy:
+    return AgentPolicy(max_tool_calls=3, model_timeout_seconds=5.0, prompt_version="v1", model_id=model_id)
+
+
+def _numbered_cases(data_root: Path, dart_hash: str, count: int) -> list[ReplayCase]:
+    return [
+        dataclasses.replace(_case(data_root, hashes=(dart_hash,)), case_id=f"case-{number + 1}")
+        for number in range(count)
+    ]
+
+
+def test_agent_outcome_split(tmp_path: Path) -> None:
+    """OK, rejected and unavailable narratives are counted separately with reasons."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    model = _OutcomeModel([{"kind": "ok"}, {"kind": "bad"}, TimeoutError("slow")])
+    report = evaluate_cases(_numbered_cases(data_root, dart_hash, 3), data_root, model, _agent_policy())  # type: ignore[arg-type]
+    assert report.agent_ok_num == 1
+    assert report.agent_rejected_num == 1
+    assert report.agent_unavailable_num == 1
+    assert report.agent_den == 3
+    assert report.agent_ok_num + report.agent_rejected_num + report.agent_unavailable_num == report.agent_den
+    assert dict(report.agent_reason_counts) == {"ungrounded_number": 1, "narrative_unavailable": 1}
+    assert report.agent_model_id == "test-model"
+
+
+def test_agent_unavailable_not_tool_invalid(tmp_path: Path) -> None:
+    """A timeout is unavailable, not a rejection, and keeps tool validity."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    result = replay_case(
+        _case(data_root, hashes=(dart_hash,)), data_root, _OutcomeModel([TimeoutError("slow")]), _agent_policy()
+    )  # type: ignore[arg-type]
+    assert result.agent_status == "AGENT_UNAVAILABLE"
+    assert result.agent_reason == "narrative_unavailable"
+    assert result.tool_valid is True
+    report = evaluate_cases([_case(data_root, hashes=(dart_hash,))], data_root, _OutcomeModel([TimeoutError("slow")]), _agent_policy())  # type: ignore[arg-type]
+    assert report.agent_rejected_num == 0
+    assert report.agent_unavailable_num == 1
+    assert report.tool_valid_num == 1
+
+
+def test_agent_den_excludes_unreachable_cases(tmp_path: Path) -> None:
+    """A SOURCE_CHANGED case never reaches the agent and stays out of the denominator."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    stale = dataclasses.replace(_case(data_root, hashes=(dart_hash,), snapshot_id="other-snap"), case_id="case-2")
+    report = evaluate_cases(
+        [_case(data_root, hashes=(dart_hash,)), stale], data_root, _OutcomeModel([{"kind": "ok"}]), _agent_policy()
+    )  # type: ignore[arg-type]
+    assert report.agent_den == 1
+    assert report.agent_ok_num == 1
+
+
+def test_baseline_run_has_no_agent_fields(tmp_path: Path) -> None:
+    """Without a model the report carries no agent outcomes or identity."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    result = replay_case(_case(data_root, hashes=(dart_hash,)), data_root)
+    assert result.agent_status == ""
+    assert result.agent_reason == ""
+    assert result.agent_claim_count == 0
+    report = evaluate_cases([_case(data_root, hashes=(dart_hash,))], data_root)
+    assert report.agent_den == 0
+    assert report.agent_ok_num == 0
+    assert dict(report.agent_reason_counts) == {}
+    assert report.agent_claims_per_ok == 0.0
+    assert report.agent_model_id == ""
+
+
+def test_model_aware_run_identity(tmp_path: Path) -> None:
+    """The same model id repeats a run id while another model id changes it."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    first = evaluate_cases([_case(data_root, hashes=(dart_hash,))], data_root, _OutcomeModel([{"kind": "ok"}]), _agent_policy("a"))  # type: ignore[arg-type]
+    repeat = evaluate_cases([_case(data_root, hashes=(dart_hash,))], data_root, _OutcomeModel([{"kind": "ok"}]), _agent_policy("a"))  # type: ignore[arg-type]
+    assert first.run_id == repeat.run_id
+    other = evaluate_cases([_case(data_root, hashes=(dart_hash,))], data_root, _OutcomeModel([{"kind": "ok"}]), _agent_policy("b"))  # type: ignore[arg-type]
+    assert other.run_id != first.run_id
+    assert other.agent_model_id == "b"
+
+
+def test_agent_claims_per_ok(tmp_path: Path) -> None:
+    """Claims per OK is the mean agent-added claim count over OK cases."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    report = evaluate_cases(
+        _numbered_cases(data_root, dart_hash, 2),
+        data_root,
+        _OutcomeModel([{"kind": "ok", "count": 2}, {"kind": "ok", "count": 4}]),
+        _agent_policy(),
+    )  # type: ignore[arg-type]
+    assert report.agent_ok_num == 2
+    assert report.agent_claims_per_ok == 3.0
+
+
+def test_report_rendering_keeps_agent_counts(tmp_path: Path) -> None:
+    """Dict keys stay sorted and markdown shows agent outcomes with reason counts."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+    report = evaluate_cases(
+        _numbered_cases(data_root, dart_hash, 3),
+        data_root,
+        _OutcomeModel([{"kind": "ok"}, {"kind": "bad"}, TimeoutError("slow")]),
+        _agent_policy(),
+    )  # type: ignore[arg-type]
+    document = report_to_dict(report)
+    keys = list(document)
+    assert keys == sorted(keys)
+    assert document["agent_ok_num"] == 1
+    assert document["agent_den"] == 3
+    assert document["agent_model_id"] == "test-model"
+    markdown = render_report_markdown(report)
+    assert "1/3" in markdown
+    assert "ungrounded_number: 1" in markdown
+    assert "narrative_unavailable: 1" in markdown
+
+
+def test_positional_constructors_compatible() -> None:
+    """Existing positional constructions stay valid with appended defaults."""
+    from src.eval.replay import EvaluationReport, ReplayResult
+
+    result = ReplayResult("c", "h", 0, 0, 0, 0, True, "OK", 0, 0.0)
+    assert result.agent_status == ""
+    assert result.agent_reason == ""
+    assert result.agent_claim_count == 0
+    report = EvaluationReport(
+        "eval-1", 0, {}, 0.0, 0, 0, 0.0, 0, 0, 0.0, 0, 0, 0.0, 0, 0, 0, 0.0, 0, 0, 0.0, 0.0, ()
+    )
+    assert report.agent_den == 0
+    assert dict(report.agent_reason_counts) == {}
+    assert report.agent_model_id == ""
+
+
+def test_agent_outcome_derives_only_from_statuses() -> None:
+    """Statuses without an agent marker yield an empty outcome and reason."""
+    from src.eval.replay import _agent_outcome
+
+    assert _agent_outcome(("SOME_STATUS",)) == ("", "")
+    assert _agent_outcome(("AGENT_OK", "AGENT_PROMPT:v2")) == ("AGENT_OK", "")
+    assert _agent_outcome(("AGENT_REJECTED", "AGENT_REASON:ungrounded_number")) == (
+        "AGENT_REJECTED",
+        "ungrounded_number",
+    )
+
+
+def test_malformed_counted_as_rejected(tmp_path: Path) -> None:
+    """A ValueError at the narrative stage counts as rejected with its malformed reason."""
+    rig = _rig(tmp_path)
+    data_root = rig["data_root"]
+    assert isinstance(data_root, Path)
+    dart_hash = rig["dart_hash"]
+    assert isinstance(dart_hash, str)
+
+    class _MalformedModel:
+        def generate_json(self, messages: object, schema_name: str) -> dict[str, object]:
+            del messages
+            if schema_name == "tool_plan":
+                return {"tool_calls": []}
+            raise ValueError("truncated")
+
+    report = evaluate_cases(
+        [_case(data_root, hashes=(dart_hash,))], data_root, _MalformedModel(), _agent_policy()  # type: ignore[arg-type]
+    )
+    assert report.agent_rejected_num == 1
+    assert report.agent_unavailable_num == 0
+    assert dict(report.agent_reason_counts) == {"narrative_malformed": 1}
