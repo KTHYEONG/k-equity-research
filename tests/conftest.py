@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
 from _pytest.config import Config
 
 # Prevent writing compiled bytecode during test runs
@@ -47,3 +48,10 @@ def pytest_sessionfinish(session: object, exitstatus: int) -> None:
                     item.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_source_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ambient shell API keys out of every test; tests declare their own credentials."""
+    for name in ("OPENDART_API_KEY", *(f"OPENDART_API_KEY_{n}" for n in range(2, 10)), "DART_API_KEY"):
+        monkeypatch.delenv(name, raising=False)

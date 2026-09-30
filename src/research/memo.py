@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import PurePosixPath
 
+from src.core.buyback_document import BuybackFact
 from src.research.context import ResearchContext
+from src.research.financial_snapshot import build_financial_snapshot
 
-CODE_REVISION = "memo-baseline-v2"
+CODE_REVISION = "memo-baseline-v3"
 
 _FACT_KEYS: dict[str, str] = {
     "ACQ_OSTK_PRC": "planned_amount_krw",
@@ -82,6 +85,11 @@ def _filing_artifact(context: ResearchContext) -> tuple[PurePosixPath | None, st
     return None, context.parsed.document_hash
 
 
+def _is_stated_absent(fact: BuybackFact) -> bool:
+    """A dash in the optional daily-order-limit cell means the filing states no limit; it is not a parse failure."""
+    return fact.field == "BUY_OSTK_LMT" and fact.value_text == "-"
+
+
 def _format_decimal(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
@@ -130,7 +138,7 @@ def build_baseline_memo(
         fact = by_field.get(field)
         if fact is None or fact.status != "VERIFIED":
             facts[key] = None
-            if fact is not None and fact.status != "NOT_APPLICABLE":
+            if fact is not None and fact.status != "NOT_APPLICABLE" and not _is_stated_absent(fact):
                 statuses.add("UNVERIFIED")
             continue
         if fact.value_decimal is not None:
@@ -269,6 +277,81 @@ def build_baseline_memo(
                 metric_key=f"car_h{horizon}",
             )
         )
+    facts["company_name"] = None
+    name_path = context.artifact_paths.get(context.company_name_source_hash or "")
+    if context.company_name and context.company_name_source_hash and name_path is not None:
+        facts["company_name"] = context.company_name
+        evidence.append(
+            EvidenceRef(
+                id="security-master",
+                source_kind="krx_security_master",
+                local_relative_path=name_path,
+                sha256=context.company_name_source_hash,
+                locator=f"ISU_CD={context.security.source_security_id} ISU_ABBRV session={context.security.session.isoformat()}",
+            )
+        )
+        claims.append(
+            MemoClaim(
+                kind="identity",
+                text=f"Observed listed name of {context.filing.stock_code} on {context.security.session.isoformat()} is {context.company_name}.",
+                evidence_ids=("security-master",),
+                metric_key=None,
+            )
+        )
+    planned_text = facts["planned_amount_krw"]
+    snapshot = build_financial_snapshot(
+        context.financial_facts,
+        context.filing.knowledge_available_at,
+        Decimal(planned_text) if planned_text is not None else None,
+    )
+    facts.update(dict.fromkeys(_FINANCIAL_FACT_KEYS))
+    metrics.update(dict.fromkeys(_FINANCIAL_RATIO_KEYS))
+    if snapshot is None:
+        statuses.add("FINANCIALS_UNAVAILABLE")
+    else:
+        facts["financials_period"] = snapshot.fiscal_period
+        facts["financials_basis"] = snapshot.basis
+        provenance = f"{snapshot.fiscal_period} {snapshot.basis}, available {snapshot.available_at.date().isoformat()}"
+        fact_ref_ids: dict[str, str] = {}
+        for name, fin_fact in sorted(snapshot.facts.items()):
+            facts[f"fin_{_FINANCIAL_LABEL[name]}"] = str(fin_fact.value)
+            ref_id = f"fin-{name}"
+            fact_ref_ids[name] = ref_id
+            evidence.append(
+                EvidenceRef(
+                    id=ref_id,
+                    source_kind="financial_bronze",
+                    local_relative_path=PurePosixPath("imports/financial_evidence") / fin_fact.source_hash / "payload.json",
+                    sha256=fin_fact.source_hash,
+                    locator=fin_fact.evidence_key,
+                )
+            )
+            claims.append(
+                MemoClaim(
+                    kind="financial",
+                    text=f"Observed {_FINANCIAL_LABEL[name]} is {fin_fact.value} KRW ({provenance}).",
+                    evidence_ids=(ref_id,),
+                    metric_key=None,
+                )
+            )
+        amount_ref = ("filing-fact-acq_ostk_prc",) if "filing-fact-acq_ostk_prc" in _evidence_by_id(tuple(evidence)) else ()
+        ratio_inputs = {
+            "cash_to_assets": ("cash", "assets"),
+            "liabilities_to_equity": ("debt", "equity"),
+            "amount_to_cash": ("cash",),
+            "amount_to_equity": ("equity",),
+        }
+        for ratio_key, ratio in sorted(snapshot.ratios.items()):
+            metrics[ratio_key] = _format_decimal(ratio)
+            refs = tuple(fact_ref_ids[name] for name in ratio_inputs[ratio_key])
+            claims.append(
+                MemoClaim(
+                    kind="financial_ratio",
+                    text=f"Observed {ratio_key} is {ratio} (deterministic ratio, {provenance}).",
+                    evidence_ids=refs + (amount_ref if ratio_key.startswith("amount_") else ()),
+                    metric_key=ratio_key,
+                )
+            )
     if analogue_ref is not None and any(metrics[key] is not None for key in ("analogue_p25", "analogue_median", "analogue_p75")):
         ref_id = "tool-analogues"
         evidence.append(
@@ -381,29 +464,148 @@ def memo_to_dict(memo: ResearchMemo) -> dict[str, object]:
     }
 
 
+_FINANCIAL_LABEL = {"assets": "assets", "cash": "cash", "debt": "liabilities", "equity": "equity"}
+_FINANCIAL_FACT_KEYS = ("financials_period", "financials_basis", "fin_assets", "fin_cash", "fin_equity", "fin_liabilities")
+_FINANCIAL_RATIO_KEYS = ("amount_to_cash", "amount_to_equity", "cash_to_assets", "liabilities_to_equity")
+_KRW_FACTS = frozenset({"planned_amount_krw", "fin_assets", "fin_cash", "fin_equity", "fin_liabilities"})
+_NUMERIC_FACTS = _KRW_FACTS | {"planned_shares", "daily_limit_shares"}
+_STATUS_MEANING = {
+    "AMOUNT_UNAVAILABLE": "the filing states no common-stock amount (e.g. preferred-share redemption); size ratios are withheld",
+    "SHARES_UNAVAILABLE": "the filing states no common-stock quantity (e.g. preferred-share redemption); size ratios are withheld",
+    "FINANCIALS_UNAVAILABLE": "no complete KRW balance sheet was observable when the buyback was filed",
+    "CONFOUNDED": "material disclosures by the issuer fall inside the study window; movement is not attributable to the buyback alone",
+    "LOW_SAMPLE": "too few pre-filing analogues for summary statistics",
+    "CONFOUND_CHECK_INCOMPLETE": "concurrent-disclosure coverage is not fully verified",
+    "ANALOGUE_EVIDENCE_UNVERIFIED": "analogue statistics are withheld until the analogue proof file is verified",
+    "UNVERIFIED": "at least one filing fact could not be verified against the source document",
+}
+_PERCENT_METRICS = frozenset(
+    {"amount_to_cash", "amount_to_equity", "cash_to_assets", "liabilities_to_equity", "amount_to_market_cap", "shares_to_listed_shares", "analogue_median", "analogue_p25", "analogue_p75",
+     "car_h1", "car_h5", "car_h20", "intraday_excess_s0"}
+)
+_RATIO_METRICS = frozenset(
+    {"amount_to_market_cap", "shares_to_listed_shares", "amount_to_cash", "amount_to_equity", "cash_to_assets", "liabilities_to_equity"}
+)
+_CONCURRENT_RE = re.compile(r"^Issuer filed (?P<title>.*) under receipt (?P<rcept>\d{14}) in the event study window\.$")
+
+
+def _decimal_or_none(text: str | None) -> Decimal | None:
+    return None if text is None else Decimal(text)
+
+
+def _pct(value: Decimal, *, signed: bool) -> str:
+    """Percent with two decimals; keep four for tiny non-zero values so they never round to zero."""
+    percent = value * 100
+    if percent != 0 and abs(percent) < Decimal("0.01"):
+        return f"{percent:.4f}%"
+    return f"{percent:+.2f}%" if signed else f"{percent:.2f}%"
+
+
+def _krw(value: Decimal) -> str:
+    if value >= Decimal(10) ** 12:
+        return f"{value / Decimal(10) ** 12:,.2f}조원"
+    if value >= Decimal(10) ** 8:
+        return f"{value / Decimal(10) ** 8:,.1f}억원"
+    return f"{value:,.0f}원"
+
+
+def _display_metric(key: str, raw: str | None) -> str:
+    value = _decimal_or_none(raw)
+    if value is None:
+        return "withheld" if raw is None else raw
+    if key in _PERCENT_METRICS:
+        return _pct(value, signed=key not in _RATIO_METRICS)
+    return f"{value:,.0f}" if value == value.to_integral_value() else str(value)
+
+
+def _display_fact(key: str, raw: str | None) -> str:
+    value = _decimal_or_none(raw) if key in _NUMERIC_FACTS else None
+    if value is None:
+        return "withheld" if raw is None else raw
+    return _krw(value) if key in _KRW_FACTS else f"{value:,.0f}"
+
+
+def _concurrent_lines(memo: ResearchMemo) -> list[str]:
+    entries: list[tuple[str, str]] = []
+    for claim in memo.claims:
+        if claim.kind != "concurrent_disclosure":
+            continue
+        matched = _CONCURRENT_RE.match(claim.text)
+        if matched is None:
+            entries.append(("", claim.text))
+            continue
+        rcept = matched.group("rcept")
+        entries.append((f"{rcept[:4]}-{rcept[4:6]}-{rcept[6:8]}", f"{matched.group('title').strip()} ({rcept})"))
+    return [f"- {day} {text}".rstrip() if day else f"- {text}" for day, text in sorted(entries)]
+
+
 def render_markdown(memo: ResearchMemo) -> str:
-    """Render the validated structured memo for human review without recomputing any figure. Return stable Markdown for identical memo inputs."""
+    """Render a reader-first summary followed by the full audit trail, without recomputing any figure.
+
+    Human-facing figures are display-formatted only; exact decimals stay in the structured memo. Return
+    stable Markdown for identical memo inputs.
+    """
+    facts, metrics = memo.facts, memo.metrics
     lines = [
-        f"# Baseline memo {memo.event_id}",
+        f"# Buyback memo: {facts.get('company_name') or facts.get('stock_code') or 'unresolved'}"
+        f" ({facts.get('stock_code') or 'withheld'}, {facts.get('market') or 'withheld'}) {memo.event_id}",
         "",
-        "Descriptive baseline only. No trade action is suggested. Observed movement is described as observed without stating why it moved.",
+        "Descriptive only. No trade action is suggested. Movement is reported as observed, without stating why it moved.",
         "",
-        f"Anchor receipt: {memo.anchor_rcept_no}",
-        f"Active receipt: {memo.active_rcept_no}",
-        f"As of: {memo.as_of.isoformat()}",
-        f"Manifest: {memo.manifest_hash}",
+        "## Summary",
         "",
-        "## Facts",
+        f"- Filed {facts.get('receipt_date') or 'withheld'}; purpose: {facts.get('purpose_text') or 'withheld'}",
+        f"- Planned: {_display_fact('planned_amount_krw', facts.get('planned_amount_krw'))},"
+        f" {_display_fact('planned_shares', facts.get('planned_shares'))} shares"
+        f" ({_display_metric('amount_to_market_cap', metrics.get('amount_to_market_cap'))} of prior market cap)",
+        f"- Buyback period: {facts.get('period_begin') or 'withheld'} to {facts.get('period_end') or 'withheld'}",
+        "- Excess return vs index (observed):"
+        f" first session {_display_metric('intraday_excess_s0', metrics.get('intraday_excess_s0'))},"
+        f" 1d {_display_metric('car_h1', metrics.get('car_h1'))},"
+        f" 5d {_display_metric('car_h5', metrics.get('car_h5'))},"
+        f" 20d {_display_metric('car_h20', metrics.get('car_h20'))}",
+        f"- Balance sheet at filing ({facts.get('financials_period') or 'withheld'}, {facts.get('financials_basis') or 'withheld'}):"
+        f" cash {_display_fact('fin_cash', facts.get('fin_cash'))}, equity {_display_fact('fin_equity', facts.get('fin_equity'))},"
+        f" liabilities/equity {_display_metric('liabilities_to_equity', metrics.get('liabilities_to_equity'))}",
+        f"- Buyback size: {_display_metric('amount_to_cash', metrics.get('amount_to_cash'))} of cash,"
+        f" {_display_metric('amount_to_equity', metrics.get('amount_to_equity'))} of equity",
+        f"- Prior analogues (first-session excess): n={_display_metric('analogue_outcome_count', metrics.get('analogue_outcome_count'))},"
+        f" median {_display_metric('analogue_median', metrics.get('analogue_median'))}"
+        f" (p25 {_display_metric('analogue_p25', metrics.get('analogue_p25'))},"
+        f" p75 {_display_metric('analogue_p75', metrics.get('analogue_p75'))})",
+        "",
+        "## Status",
         "",
     ]
-    for key in sorted(memo.facts):
-        value = memo.facts[key]
+    if memo.statuses:
+        lines.extend(f"- {status}: {_STATUS_MEANING.get(status, 'see audit trail')}" for status in memo.statuses)
+    else:
+        lines.append("- OK")
+    concurrent = _concurrent_lines(memo)
+    if concurrent:
+        lines.extend(("", f"## Concurrent disclosures ({len(concurrent)})", "", *concurrent))
+    lines.extend(
+        (
+            "",
+            "## Audit trail",
+            "",
+            f"Anchor receipt: {memo.anchor_rcept_no}",
+            f"Active receipt: {memo.active_rcept_no}",
+            f"As of: {memo.as_of.isoformat()}",
+            f"Manifest: {memo.manifest_hash}",
+            "",
+            "### Facts",
+            "",
+        )
+    )
+    for key in sorted(facts):
+        value = facts[key]
         lines.append(f"- {key}: {value if value is not None else 'withheld'}")
-    lines.extend(("", "## Metrics", ""))
-    for key in sorted(memo.metrics):
-        value = memo.metrics[key]
+    lines.extend(("", "### Metrics", ""))
+    for key in sorted(metrics):
+        value = metrics[key]
         lines.append(f"- {key}: {value if value is not None else 'withheld'}")
-    lines.extend(("", "## Claims", ""))
+    lines.extend(("", "### Claims", ""))
     if memo.claims:
         for claim in memo.claims:
             refs = ", ".join(claim.evidence_ids)
@@ -411,7 +613,7 @@ def render_markdown(memo: ResearchMemo) -> str:
             lines.append(f"- [{claim.kind}/{metric}] {claim.text} (evidence: {refs})")
     else:
         lines.append("- withheld: no verified claim is available")
-    lines.extend(("", "## Evidence", ""))
+    lines.extend(("", "### Evidence", ""))
     if memo.evidence:
         lines.extend(
             f"- {item.id}: {item.source_kind} {item.local_relative_path.as_posix()} {item.sha256} {item.locator}"
@@ -419,11 +621,8 @@ def render_markdown(memo: ResearchMemo) -> str:
         )
     else:
         lines.append("- withheld: no resolvable source is available")
-    lines.extend(("", "## Statuses", ""))
     if memo.statuses:
-        lines.extend(f"- {status}" for status in memo.statuses)
-    else:
-        lines.append("- OK")
+        lines.extend(("", "### Statuses", "", *(f"- {status}" for status in memo.statuses)))
     lines.append("")
     return "\n".join(lines)
 

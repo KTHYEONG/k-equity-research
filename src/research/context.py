@@ -63,6 +63,8 @@ class ResearchContext:
     source_hashes: tuple[str, ...]
     artifact_paths: Mapping[str, PurePosixPath]
     confounding_receipts: tuple[tuple[str, str, str], ...] = ()
+    company_name: str | None = None
+    company_name_source_hash: str | None = None
 
 
 def _require_aware(value: datetime, label: str) -> None:
@@ -345,6 +347,7 @@ def build_research_context(
         raise ResearchUnavailable(
             f"SECURITY_{security.status}", f"unresolved security for ticker {filing.stock_code}"
         )
+    named = lake.security_name(security.source_security_id, prior_session, as_of)
     prior_bar = lake.market_bar(security.instrument_id, prior_session, as_of)
     if withdrawn:
         materiality = MaterialityResult(None, None, (), "WITHDRAWN")
@@ -398,6 +401,8 @@ def build_research_context(
     if prior_bar is not None:
         hashes.add(prior_bar.source_hash)
     hashes.update(fact.source_hash for fact in financial_facts)
+    if named is not None:
+        hashes.add(named[1])
     hashes.update(bar.source_hash for bar in stock_bars)
     hashes.update(bar.source_hash for bar in index_bars)
     hashes.update(study.evidence_hashes)
@@ -428,6 +433,8 @@ def build_research_context(
         source_hashes=source_hashes,
         artifact_paths=artifact_paths,
         confounding_receipts=confounding_receipts,
+        company_name=named[0] if named is not None else None,
+        company_name_source_hash=named[1] if named is not None else None,
     )
 
 

@@ -366,3 +366,102 @@ def test_sessions_between_rejects_inverted_bounds(tmp_path: Path) -> None:
     lake = _sessions_lake(tmp_path / "data", [MON, TUE])
     with pytest.raises(ValueError, match="empty"):
         lake.sessions_between(TUE, MON)
+
+
+def test_instrument_cache_matches_direct_scan_and_never_leaks_future_bars(tmp_path: Path) -> None:
+    lake = _standard_lake(tmp_path / "data")
+    files = [str(path) for path in lake._parts[PANEL_DATASET_ID] if "year=" in str(path)]  # noqa: SLF001
+    for start, end, as_of in (
+        (MON, FRI, BATCH),
+        (TUE, THU, datetime(2024, 6, 26, 12, 0, tzinfo=KST)),
+        (WED, WED, datetime(2024, 6, 26, 17, 59, tzinfo=KST)),
+        (MON, FRI, datetime(2024, 6, 20, 0, 0, tzinfo=KST)),
+    ):
+        expected = (
+            pl.scan_parquet(files)
+            .filter(
+                (pl.col("instrument_id") == "KRX:005930")
+                & (pl.col("session") >= start)
+                & (pl.col("session") <= end)
+                & (pl.col("available_at") <= as_of)
+            )
+            .select("session", "available_at", "source_hash")
+            .collect()
+            .to_dicts()
+        )
+        got = [
+            {"session": r["session"], "available_at": r["available_at"], "source_hash": r["source_hash"]}
+            for r in lake._panel_rows("KRX:005930", start, end, as_of)  # noqa: SLF001
+        ]
+        assert got == expected
+    assert lake._panel_rows("KRX:UNKNOWN", MON, FRI, BATCH) == []  # noqa: SLF001
+    assert "_part" not in lake._panel_rows("KRX:005930", MON, FRI, BATCH)[0]  # noqa: SLF001
+
+
+def test_instrument_cache_is_bounded_lru(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.data.local_lake as module
+
+    monkeypatch.setattr(module, "_INSTRUMENT_CACHE_SIZE", 2)
+    lake = _standard_lake(tmp_path / "data")
+    for name in ("KRX:005930", "KRX:A", "KRX:B"):
+        lake._instrument_rows(name)  # noqa: SLF001
+    assert list(lake._instrument_cache) == ["KRX:A", "KRX:B"]  # noqa: SLF001
+
+
+def _named_lake(data_root: Path, payload: bytes, cited: str | None) -> LocalLake:
+    import json as _json
+
+    digest = hashlib.sha256(payload).hexdigest()
+    target = data_root / "raw/imported/security_master" / digest / "payload.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    rows = [{**row, "source_hash": cited or digest} for row in _universe_rows()]
+    del _json
+    universe = _register(
+        data_root, UNIVERSE_DATASET_ID,
+        {f"session={row['session'].isoformat()}/part.parquet": pl.DataFrame([row]) for row in rows},  # type: ignore[union-attr]
+    )
+    return LocalLake(data_root, {UNIVERSE_DATASET_ID: universe})
+
+
+def _master(records: list[dict[str, str]]) -> bytes:
+    import json as _json
+
+    return _json.dumps({"records": records, "session": "2024-06-25"}).encode()
+
+
+def test_security_name_is_point_in_time_hash_verified_and_unambiguous(tmp_path: Path) -> None:
+    record = {"ISU_CD": "KR7005930003", "ISU_ABBRV": " 삼성전자 "}
+    payload = _master([record, {"ISU_CD": "KR7000000009", "ISU_ABBRV": "다른회사"}])
+    lake = _named_lake(tmp_path / "data", payload, None)
+    named = lake.security_name("KR7005930003", TUE, BATCH)
+    assert named == ("삼성전자", hashlib.sha256(payload).hexdigest())
+    assert lake.security_name("KR7005930003", TUE, datetime(2024, 6, 25, 9, 0, tzinfo=KST)) is None
+    assert lake.security_name("KR7999999999", TUE, BATCH) is None
+    with pytest.raises(ValueError, match="timezone"):
+        lake.security_name("KR7005930003", TUE, datetime(2024, 6, 25, 9, 0))
+
+
+def test_security_name_withheld_for_duplicate_records_or_tampered_payload(tmp_path: Path) -> None:
+    dup = _master([{"ISU_CD": "KR7005930003", "ISU_ABBRV": "가"}, {"ISU_CD": "KR7005930003", "ISU_ABBRV": "나"}])
+    assert _named_lake(tmp_path / "a", dup, None).security_name("KR7005930003", TUE, BATCH) is None
+    good = _master([{"ISU_CD": "KR7005930003", "ISU_ABBRV": "삼성전자"}])
+    assert _named_lake(tmp_path / "b", good, "f" * 64).security_name("KR7005930003", TUE, BATCH) is None
+    lake = _named_lake(tmp_path / "c", good, None)
+    digest = hashlib.sha256(good).hexdigest()
+    (tmp_path / "c" / "raw/imported/security_master" / digest / "payload.json").write_bytes(b"tampered")
+    assert lake.security_name("KR7005930003", TUE, BATCH) is None
+
+
+def test_universe_lookup_cache_is_bounded_and_name_payload_is_parsed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.data.local_lake as module
+
+    monkeypatch.setattr(module, "_UNIVERSE_CACHE_SIZE", 1)
+    payload = _master([{"ISU_CD": "KR7005930003", "ISU_ABBRV": "삼성전자"}])
+    lake = _named_lake(tmp_path / "data", payload, None)
+    assert lake.security_name("KR7005930003", TUE, BATCH) is not None
+    assert lake.security_name("KR7005930003", TUE, BATCH) is not None
+    lake._universe_rows(WED, "005930", BATCH)  # noqa: SLF001
+    assert len(lake._universe_cache) == 1  # noqa: SLF001

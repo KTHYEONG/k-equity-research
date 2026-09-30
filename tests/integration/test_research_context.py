@@ -510,3 +510,28 @@ def test_aggregate_outcomes_match_full_context_and_omit_unresolved(rig: dict[str
     assert measured.status == context.study.status
     assert measured.amount_ratio == context.materiality.amount_to_market_cap
     assert measured.market == "KOSPI"
+
+
+def test_bulk_publication_is_verified_idempotent_and_isolates_unresolved(rig: dict[str, object]) -> None:
+    from src.research.bulk import publish_all_memos
+
+    data_root = rig["catalog"].db_path.parent  # type: ignore[attr-defined]
+    as_of = datetime(2024, 6, 29, 18, 0, tzinfo=KST)
+    args = (
+        data_root, rig["catalog"], rig["event_store"], rig["lake"], rig["financial"], rig["index_store"],  # type: ignore[arg-type]
+        as_of, POLICY,
+    )
+    seen: list[tuple[int, int]] = []
+    first = publish_all_memos(*args, None, lambda done, total: seen.append((done, total)))  # type: ignore[arg-type]
+    linked = len(rig["event_store"].list_prior_events(as_of))  # type: ignore[attr-defined]
+    assert first.linked == linked
+    assert first.published + sum(first.unavailable.values()) + len(first.failed) == linked
+    assert first.published >= 1
+    assert seen[-1] == (linked, linked)
+    reports = sorted((data_root / "reports").glob("*/*/memo.md"))
+    assert len(reports) == first.published
+    again = publish_all_memos(*args)  # type: ignore[arg-type]
+    assert again.published == first.published
+    assert sorted((data_root / "reports").glob("*/*/memo.md")) == reports
+    limited = publish_all_memos(*args, 1)  # type: ignore[arg-type]
+    assert limited.linked == 1

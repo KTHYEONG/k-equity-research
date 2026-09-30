@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -157,6 +159,10 @@ def _to_bar(row: dict[str, Any]) -> MarketBar | None:
     )
 
 
+_INSTRUMENT_CACHE_SIZE = 512
+_UNIVERSE_CACHE_SIZE = 8192
+
+
 class LocalLake:
     """Validated reads over this repository's imported market and universe parts."""
 
@@ -167,6 +173,10 @@ class LocalLake:
         self._parts: dict[str, tuple[Path, ...]] = {}
         for dataset_id, manifest in manifests.items():
             self._parts[dataset_id] = self._verify_dataset(data_root, dataset_id, manifest)
+        self._universe_cache: OrderedDict[tuple[date, str, str], tuple[dict[str, Any], ...]] = OrderedDict()
+        self._name_cache: dict[str, dict[str, str]] = {}
+        self._zones: dict[str, str | None] = {}
+        self._instrument_cache: OrderedDict[str, tuple[tuple[Path, dict[str, Any]], ...]] = OrderedDict()
         self._sessions = self._load_sessions()
 
     def _verify_dataset(
@@ -236,50 +246,136 @@ class LocalLake:
             raise ValueError("session window must not be empty")
         return tuple(session for session in self._sessions if start <= session <= end)
 
-    def _universe_rows(self, session: date, ticker: str, as_of: datetime) -> list[dict[str, Any]]:
+    def _universe_lookup(self, session: date, column: str, value: str) -> tuple[dict[str, Any], ...]:
+        """Return one session's universe rows for a ticker or ISIN, unfiltered by availability, scanning parquet once.
+
+        Keyed by the identifier rather than by session because prior-event lookups touch one row of a large
+        session. The point-in-time availability filter is applied per call by the caller.
+        """
+        key = (session, column, value)
+        cached = self._universe_cache.get(key)
+        if cached is not None:
+            self._universe_cache.move_to_end(key)
+            return cached
         files = [
-            str(path)
+            path
             for path in self._parts[UNIVERSE_DATASET_ID]
             if _hint_matches(path, "session=", session.isoformat()) and _has_columns(path, _UNIVERSE_COLUMNS)
         ]
-        if not files:
-            return []
-        cutoff = _asof_literal(files, as_of)
-        return (
-            pl.scan_parquet(files)
-            .filter(
-                (pl.col("session") == session)
-                & (pl.col("ticker") == ticker)
-                & (pl.col("available_at") <= cutoff)
+        rows: tuple[dict[str, Any], ...] = ()
+        if files:
+            columns = list(_UNIVERSE_COLUMNS)
+            if all(_has_columns(path, ("source_hash",)) for path in files):
+                columns.append("source_hash")
+            rows = tuple(
+                pl.scan_parquet([str(path) for path in files])
+                .filter((pl.col("session") == session) & (pl.col(column) == value))
+                .select(columns)
+                .collect()
+                .to_dicts()
             )
-            .select(list(_UNIVERSE_COLUMNS))
-            .collect()
-            .to_dicts()
-        )
+        self._universe_cache[key] = rows
+        if len(self._universe_cache) > _UNIVERSE_CACHE_SIZE:
+            self._universe_cache.popitem(last=False)
+        return rows
+
+    def _universe_rows(self, session: date, ticker: str, as_of: datetime) -> list[dict[str, Any]]:
+        rows = self._universe_lookup(session, "ticker", ticker)
+        if not rows:
+            return []
+        cutoff = as_of.astimezone(ZoneInfo(self._available_at_zone(UNIVERSE_DATASET_ID) or "UTC"))
+        return [row for row in rows if row["available_at"] <= cutoff]
+
+    def security_name(self, source_security_id: str, session: date, as_of: datetime) -> tuple[str, str] | None:
+        """Return the listed short name and its verified source-payload hash for one security on one session.
+
+        The name comes from the KRX security-master payload cited by that session's universe row, so it is the name
+        in force then, not today's. Returns None unless exactly one universe row and one payload record match and the
+        payload bytes hash to the cited digest.
+        """
+        _require_aware(as_of, "as_of")
+        cutoff = as_of.astimezone(ZoneInfo(self._available_at_zone(UNIVERSE_DATASET_ID) or "UTC"))
+        cited = {
+            str(row["source_hash"]).lower()
+            for row in self._universe_lookup(session, "source_security_id", source_security_id)
+            if row["available_at"] <= cutoff
+            and row.get("source_hash")
+        }
+        if len(cited) != 1:
+            return None
+        digest = next(iter(cited))
+        names = self._security_master_names(digest)
+        name = names.get(source_security_id)
+        return None if not name else (name, digest)
+
+    def _security_master_names(self, digest: str) -> dict[str, str]:
+        cached = self._name_cache.get(digest)
+        if cached is not None:
+            return cached
+        names: dict[str, str] = {}
+        target = checked_local_path(self._data_root, PurePosixPath("raw/imported/security_master") / digest / "payload.json")
+        try:
+            raw = target.read_bytes()
+        except OSError:
+            raw = b""
+        if raw and hashlib.sha256(raw).hexdigest() == digest:
+            counts: dict[str, int] = {}
+            for record in json.loads(raw.decode("utf-8")).get("records", []):
+                code, abbreviation = str(record.get("ISU_CD", "")), str(record.get("ISU_ABBRV", "")).strip()
+                counts[code] = counts.get(code, 0) + 1
+                names[code] = abbreviation
+            names = {code: name for code, name in names.items() if counts[code] == 1}
+            self._name_cache[digest] = names
+        return names
+
+    def _instrument_rows(self, instrument_id: str) -> tuple[tuple[Path, dict[str, Any]], ...]:
+        """Return every retained panel row of one instrument with its source part, reading parquet once per instrument.
+
+        Rows are immutable imported data; session and availability filters are applied per call by the caller so
+        point-in-time semantics never depend on cache state.
+        """
+        cached = self._instrument_cache.get(instrument_id)
+        if cached is not None:
+            self._instrument_cache.move_to_end(instrument_id)
+            return cached
+        files = [str(path) for path in self._parts[PANEL_DATASET_ID] if _has_columns(path, _BAR_COLUMNS)]
+        rows: tuple[tuple[Path, dict[str, Any]], ...] = ()
+        if files:
+            frame = (
+                pl.scan_parquet(files, include_file_paths="_part")
+                .filter(pl.col("instrument_id") == instrument_id)
+                .select([*_BAR_COLUMNS, "_part"])
+                .collect()
+            )
+            rows = tuple((Path(str(row.pop("_part"))), row) for row in frame.to_dicts())
+        self._instrument_cache[instrument_id] = rows
+        if len(self._instrument_cache) > _INSTRUMENT_CACHE_SIZE:
+            self._instrument_cache.popitem(last=False)
+        return rows
 
     def _panel_rows(
         self, instrument_id: str, start: date, end: date, as_of: datetime
     ) -> list[dict[str, Any]]:
-        files = [
-            str(path)
-            for path in self._parts[PANEL_DATASET_ID]
-            if _year_in_window(path, start, end) and _has_columns(path, _BAR_COLUMNS)
-        ]
-        if not files:
+        rows = self._instrument_rows(instrument_id)
+        if not rows:
             return []
-        cutoff = _asof_literal(files, as_of)
-        return (
-            pl.scan_parquet(files)
-            .filter(
-                (pl.col("instrument_id") == instrument_id)
-                & (pl.col("session") >= start)
-                & (pl.col("session") <= end)
-                & (pl.col("available_at") <= cutoff)
-            )
-            .select(list(_BAR_COLUMNS))
-            .collect()
-            .to_dicts()
-        )
+        zone = self._available_at_zone()
+        cutoff = as_of.astimezone(ZoneInfo(zone or "UTC"))
+        # The partition year in a part's path is authoritative, exactly as in a pruned scan.
+        return [
+            row
+            for part, row in rows
+            if _year_in_window(part, start, end) and start <= row["session"] <= end and row["available_at"] <= cutoff
+        ]
+
+    def _available_at_zone(self, dataset_id: str = PANEL_DATASET_ID) -> str | None:
+        """Return the timezone of ``available_at`` for a dataset; identical across parts, so read the first once."""
+        if dataset_id not in self._zones:
+            columns = _BAR_COLUMNS if dataset_id == PANEL_DATASET_ID else _UNIVERSE_COLUMNS
+            first = next(path for path in self._parts[dataset_id] if _has_columns(path, columns))
+            dtype = pl.scan_parquet(str(first)).collect_schema()["available_at"]
+            self._zones[dataset_id] = dtype.time_zone if isinstance(dtype, pl.Datetime) else None
+        return self._zones[dataset_id]
 
     def resolve_security(self, stock_code: str, session: date, as_of: datetime) -> SecurityMatch:
         """Verify one historical ordinary-share identity against the local universe and market panel; return an ambiguity status instead of guessing."""

@@ -8,6 +8,8 @@ from decimal import Decimal
 from pathlib import PurePosixPath
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.core.buyback_document import BuybackFact, EvidenceLocation, ParsedBuyback
 from src.core.revisions import EventLink
 from src.data.catalog import FilingVersion
@@ -365,3 +367,161 @@ def test_unresolvable_tool_hash_withholds_claim_keeps_metric() -> None:
     assert all(claim.metric_key != "amount_to_market_cap" for claim in memo.claims)
     assert "tool-intraday-s0" in {item.id for item in memo.evidence}
     assert "tool-car-h1" in {item.id for item in memo.evidence}
+
+
+@pytest.mark.parametrize(
+    ("value", "signed", "expected"),
+    [
+        (Decimal("0.036415"), True, "+3.64%"),
+        (Decimal("-0.0205"), True, "-2.05%"),
+        (Decimal("0"), True, "+0.00%"),
+        (Decimal("0.0000512219"), False, "0.0051%"),
+        (Decimal("0.0329504"), False, "3.30%"),
+    ],
+)
+def test_percent_display_never_rounds_small_nonzero_to_zero(value: Decimal, signed: bool, expected: str) -> None:
+    from src.research.memo import _pct
+
+    assert _pct(value, signed=signed) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (Decimal(159_957_600), "1.6억원"),
+        (Decimal(40_004_340_000_000), "40.00조원"),
+        (Decimal(9_500_000), "9,500,000원"),
+    ],
+)
+def test_krw_display_scales_by_magnitude(value: Decimal, expected: str) -> None:
+    from src.research.memo import _krw
+
+    assert _krw(value) == expected
+
+
+def test_markdown_leads_with_summary_and_keeps_exact_values_in_audit_trail() -> None:
+    memo = build_baseline_memo(_context(study=_study(Decimal("-0.0205468634105692"))))
+    markdown = render_markdown(memo)
+    assert markdown.index("## Summary") < markdown.index("## Audit trail")
+    summary = markdown.split("## Audit trail")[0]
+    assert "-2.05%" in summary
+    assert "-0.0205468634105692" not in summary
+    assert "-0.0205468634105692" in markdown.split("## Audit trail")[1]
+    assert "CONFOUND_CHECK_INCOMPLETE: concurrent-disclosure coverage is not fully verified" in summary
+
+
+def test_concurrent_disclosures_are_listed_chronologically_with_receipts() -> None:
+    import dataclasses
+
+    from src.research.memo import MemoClaim
+
+    base = build_baseline_memo(_context())
+    claims = (
+        MemoClaim("concurrent_disclosure", "Issuer filed 배당결정 under receipt 20240703000004 in the event study window.", ("e",), None),
+        MemoClaim("concurrent_disclosure", "Issuer filed 잠정실적 under receipt 20240628000001 in the event study window.", ("e",), None),
+        MemoClaim("concurrent_disclosure", "unparseable claim text", ("e",), None),
+    )
+    memo = dataclasses.replace(base, claims=claims)
+    section = render_markdown(memo).split("## Concurrent disclosures (3)")[1].split("## Audit trail")[0]
+    lines = [line for line in section.splitlines() if line.startswith("- ")]
+    assert lines == [
+        "- unparseable claim text",
+        "- 2024-06-28 잠정실적 (20240628000001)",
+        "- 2024-07-03 배당결정 (20240703000004)",
+    ]
+
+
+def test_counts_display_as_plain_numbers() -> None:
+    import dataclasses
+
+    base = build_baseline_memo(_context())
+    memo = dataclasses.replace(base, metrics={**base.metrics, "analogue_outcome_count": "8"})
+    assert "n=8," in render_markdown(memo).split("## Audit trail")[0]
+
+
+def _sheet_facts(available: datetime = datetime(2024, 5, 20, tzinfo=KST)) -> tuple[object, ...]:
+    from src.data.financial_evidence import VerifiedFinancialFact
+
+    values = {"assets": "10000000000", "cash": "4000000000", "debt": "2000000000", "equity": "8000000000"}
+    return tuple(
+        VerifiedFinancialFact(
+            corp_code="01386916", filing_id="F1", fact=name, fiscal_period="2024Q1", consolidated=True,
+            value=Decimal(value), unit="KRW", available_at=available, source_hash=name[0] * 64, evidence_key=f"key-{name}",
+        )
+        for name, value in values.items()
+    )
+
+
+def test_financial_snapshot_adds_cited_facts_ratios_and_summary() -> None:
+    import dataclasses
+
+    context = dataclasses.replace(_context(), financial_facts=_sheet_facts())  # type: ignore[arg-type]
+    memo = build_baseline_memo(context)
+    assert memo.facts["financials_period"] == "2024Q1"
+    assert memo.facts["financials_basis"] == "consolidated"
+    assert memo.facts["fin_liabilities"] == "2000000000"
+    assert memo.metrics["amount_to_cash"] == str(Decimal("1000000000") / Decimal("4000000000"))
+    assert memo.metrics["liabilities_to_equity"] == str(Decimal("2000000000") / Decimal("8000000000"))
+    assert "FINANCIALS_UNAVAILABLE" not in memo.statuses
+    by_id = {ref.id: ref for ref in memo.evidence}
+    assert by_id["fin-cash"].sha256 == "c" * 64
+    assert by_id["fin-cash"].local_relative_path == PurePosixPath("imports/financial_evidence") / ("c" * 64) / "payload.json"
+    cash_ratio = next(claim for claim in memo.claims if claim.metric_key == "amount_to_cash")
+    assert set(cash_ratio.evidence_ids) == {"fin-cash", "filing-fact-acq_ostk_prc"}
+    summary = render_markdown(memo).split("## Audit trail")[0]
+    assert "Balance sheet at filing (2024Q1, consolidated): cash 40.0억원, equity 80.0억원, liabilities/equity 25.00%" in summary
+    assert "Buyback size: 25.00% of cash, 12.50% of equity" in summary
+
+
+def test_financials_after_filing_knowledge_are_not_used_and_status_is_explicit() -> None:
+    import dataclasses
+
+    late = datetime(2024, 7, 1, tzinfo=KST)
+    context = dataclasses.replace(_context(), financial_facts=_sheet_facts(available=late))  # type: ignore[arg-type]
+    memo = build_baseline_memo(context)
+    assert "FINANCIALS_UNAVAILABLE" in memo.statuses
+    assert memo.facts["fin_cash"] is None
+    assert memo.metrics["amount_to_cash"] is None
+    assert not any(claim.kind.startswith("financial") for claim in memo.claims)
+    assert "no complete KRW balance sheet" in render_markdown(memo)
+
+
+def _limit_fact(text: str) -> BuybackFact:
+    return BuybackFact("BUY_OSTK_LMT", None, text, "shares", _location("20240620000001", "BUY_OSTK_LMT"), "UNVERIFIED")
+
+
+@pytest.mark.parametrize(("cell", "flagged"), [("-", False), ("abc", True)])
+def test_dash_daily_limit_is_stated_absence_but_other_unparsed_values_stay_flagged(cell: str, flagged: bool) -> None:
+    import dataclasses
+
+    base = _parsed()
+    parsed = dataclasses.replace(base, facts=(*base.facts, _limit_fact(cell)))
+    memo = build_baseline_memo(_context(parsed=parsed))
+    assert memo.facts["daily_limit_shares"] is None
+    assert ("UNVERIFIED" in memo.statuses) is flagged
+
+
+def test_company_name_is_cited_and_leads_the_title() -> None:
+    import dataclasses
+
+    digest = "e" * 64
+    path = PurePosixPath("raw/imported/security_master") / digest / "payload.json"
+    context = _context()
+    context = dataclasses.replace(
+        context, company_name="테스트전자", company_name_source_hash=digest, artifact_paths={**context.artifact_paths, digest: path}
+    )
+    memo = build_baseline_memo(context)
+    assert memo.facts["company_name"] == "테스트전자"
+    ref = next(item for item in memo.evidence if item.id == "security-master")
+    assert (ref.local_relative_path, ref.sha256) == (path, digest)
+    assert render_markdown(memo).splitlines()[0].startswith("# Buyback memo: 테스트전자 (000001,")
+
+
+def test_unresolvable_company_name_falls_back_to_stock_code() -> None:
+    import dataclasses
+
+    context = dataclasses.replace(_context(), company_name="테스트전자", company_name_source_hash="e" * 64)
+    memo = build_baseline_memo(context)
+    assert memo.facts["company_name"] is None
+    assert all(item.id != "security-master" for item in memo.evidence)
+    assert render_markdown(memo).splitlines()[0].startswith("# Buyback memo: 000001 (000001,")

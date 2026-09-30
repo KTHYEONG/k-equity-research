@@ -200,8 +200,8 @@ def test_collect_financial_cli_prints_hash_rows_and_time(
     monkeypatch.setenv("OPENDART_API_KEY", "test-key")
 
     class _CLIClient:
-        def __init__(self, api_key: str, http_client: object) -> None:
-            assert api_key == "test-key"
+        def __init__(self, api_key: tuple[str, ...], http_client: object) -> None:
+            assert api_key == ("test-key",)
 
         def fetch_financial_statement(self, request: FinancialStatementRequest) -> bytes:
             assert request == REQUEST

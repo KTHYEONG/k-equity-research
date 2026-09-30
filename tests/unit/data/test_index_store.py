@@ -249,3 +249,23 @@ def test_corrupt_manifest_files_fail_closed(tmp_path: Path) -> None:
     link_target.symlink_to(origin)
     with pytest.raises(ValueError, match="symlink"):
         merge_index_manifest(None, [("KOSPI", SESSION, "c" * 64)], root)
+
+
+def test_verified_bar_is_read_once_but_failures_are_not_cached(tmp_path: Path) -> None:
+    catalog, root = _open(tmp_path)
+    digest = _registered(catalog, "KOSPI", SESSION, "코스피")
+    manifest = merge_index_manifest(None, [("KOSPI", SESSION, digest)], root)
+    store = IndexStore(catalog, root, manifest)
+    as_of = datetime(2024, 6, 28, 9, 0, tzinfo=KST)
+    path = root / "raw/krx/snap-1/KOSPI-20240627.json"
+    original = path.read_bytes()
+
+    path.write_bytes(b'{"OutBlock_1": []}')
+    assert store.window("KOSPI", SESSION, SESSION, as_of) == ()
+    path.write_bytes(original)
+    first = store.window("KOSPI", SESSION, SESSION, as_of)
+    assert len(first) == 1
+
+    path.write_bytes(b"tampered after verification")
+    assert store.window("KOSPI", SESSION, SESSION, as_of) == first
+    assert store.window("KOSPI", SESSION, SESSION, datetime(2024, 6, 27, 0, 0, tzinfo=KST)) == ()

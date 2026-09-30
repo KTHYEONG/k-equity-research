@@ -123,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2026-09-29T18:32:00+09:00.")
     aggregate.add_argument("--index-manifest", required=True)
     _add_data_root(aggregate)
+    memo_all = research_sub.add_parser("memo-all", help="Publish one verified memo for every linked event.")
+    memo_all.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2026-09-30T09:00:00+09:00.")
+    memo_all.add_argument("--index-manifest", required=True)
+    memo_all.add_argument("--limit", type=int, default=None, help="Publish only the first N events (chronological).")
+    _add_data_root(memo_all)
     repair = research_sub.add_parser("repair-memo", help="Rebuild one historical memo with verified analogue evidence.")
     repair.add_argument("--run-id", required=True)
     repair.add_argument("--index-manifest", required=True)
@@ -729,6 +734,36 @@ def _run_research_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_research_memo_all(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from src.cli.batch import _read_import_manifests
+    from src.data.event_store import EventStore
+    from src.data.financial_evidence import FinancialEvidence
+    from src.data.index_store import IndexStore, load_index_manifest
+    from src.data.local_lake import LocalLake
+    from src.research.bulk import publish_all_memos
+    from src.research.event_study import StudyPolicy
+
+    root = _resolve_data_root(args.data_root)
+    catalog = open_catalog(root)
+    as_of = datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as-of instant must be timezone-aware")
+    lake = LocalLake(root, _read_import_manifests(root))
+    index_store = IndexStore(catalog, root, load_index_manifest(root, args.index_manifest))
+
+    def _progress(done: int, total: int) -> None:
+        sys.stderr.write(f"[RESEARCH] memo-all progress events={done}/{total}\n")
+
+    summary = publish_all_memos(
+        root, catalog, EventStore(catalog), lake, FinancialEvidence(root, lake), index_store, as_of,
+        StudyPolicy(), args.limit, _progress,
+    )
+    sys.stdout.write(json.dumps(asdict(summary), ensure_ascii=False, sort_keys=True) + "\n")
+    return 0 if not summary.failed else 4
+
+
 def _run_research_repair_memo(args: argparse.Namespace) -> int:
     from src.research.repair import repair_memo_evidence
 
@@ -893,6 +928,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_research_memo(args)
         if args.command == "research" and args.research_command == "aggregate":
             return _run_research_aggregate(args)
+        if args.command == "research" and args.research_command == "memo-all":
+            return _run_research_memo_all(args)
         if args.command == "research" and args.research_command == "repair-memo":
             return _run_research_repair_memo(args)
         if args.command == "eval" and args.eval_command == "replay":

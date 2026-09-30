@@ -144,9 +144,16 @@ class _EventStore:
 
 
 class _Lake:
-    def __init__(self, match: SecurityMatch, bar_none: bool = False) -> None:
+    def __init__(
+        self, match: SecurityMatch, bar_none: bool = False, name: tuple[str, str] | None = None
+    ) -> None:
         self._match = match
         self._bar_none = bar_none
+        self._name = name
+
+    def security_name(self, source_security_id: str, session: date, as_of: datetime) -> tuple[str, str] | None:
+        del source_security_id, session, as_of
+        return self._name
 
     def previous_session(self, before: date) -> date | None:
         earlier = [session for session in SESSIONS if session < before]
@@ -379,3 +386,21 @@ def test_index_window_carries_only_eligible_bars(tmp_path: Path) -> None:
     late = _context(datetime(2024, 6, 24, 18, 0, tzinfo=KST), tmp_path)
     assert len(early.index_bars) < len(late.index_bars)  # type: ignore[attr-defined]
     assert all(bar.batch_available_at <= datetime(2024, 6, 22, 18, 0, tzinfo=KST) for bar in early.index_bars)  # type: ignore[attr-defined]
+
+
+def test_company_name_and_its_source_hash_travel_with_the_context(tmp_path: Path) -> None:
+    store = _EventStore((_event(), _parsed()))
+    args = (
+        _Catalog(tmp_path / "catalog.sqlite", FILING_DATE),  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
+        _Lake(_match(), False, ("테스트전자", "n" * 64)),  # type: ignore[arg-type]
+        _Financial(),  # type: ignore[arg-type]
+        _IndexStore(),  # type: ignore[arg-type]
+        "20240620000001",
+        datetime(2024, 6, 24, 18, 0, tzinfo=KST),
+        POLICY,
+    )
+    context = build_research_context(*args)
+    assert context.company_name == "테스트전자"
+    assert context.company_name_source_hash == "n" * 64
+    assert "n" * 64 in context.source_hashes

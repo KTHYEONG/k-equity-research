@@ -125,6 +125,7 @@ class IndexStore:
         self._catalog = catalog
         self._data_root = data_root
         self._manifest = manifest
+        self._bars: dict[tuple[str, date, str], IndexBar] = {}
 
     @property
     def manifest(self) -> IndexManifest:
@@ -132,6 +133,16 @@ class IndexStore:
         return self._manifest
 
     def _read_bar(self, market: Literal["KOSPI", "KOSDAQ"], session: date, sha256: str) -> IndexBar | None:
+        """Read and hash-verify one pinned bar once; only successes are cached so a repaired file is picked up."""
+        key = (market, session, sha256)
+        bar = self._bars.get(key)
+        if bar is None:
+            bar = self._load_bar(market, session, sha256)
+            if bar is not None:
+                self._bars[key] = bar
+        return bar
+
+    def _load_bar(self, market: Literal["KOSPI", "KOSDAQ"], session: date, sha256: str) -> IndexBar | None:
         relative = self._catalog.get_artifact_path(sha256)
         if relative is None:
             return None

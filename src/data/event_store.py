@@ -287,7 +287,10 @@ class EventStore:
         """Resolve an anchor receipt to its verified event and latest eligible linked version at as_of. Return None for ambiguous links; never include a correction before its knowledge boundary."""
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("as-of instant must be timezone-aware")
-        row = self._conn.execute("SELECT * FROM event_link").fetchall()
+        # instr() narrows the scan in SQLite; the JSON check below keeps the match exact (no substring hits).
+        row = self._conn.execute(
+            "SELECT * FROM event_link WHERE instr(rcept_nos, ?) > 0", (f'"{anchor_rcept_no}"',)
+        ).fetchall()
         target: EventLink | None = None
         for item in row:
             nos = tuple(str(value) for value in json.loads(str(item["rcept_nos"])))
