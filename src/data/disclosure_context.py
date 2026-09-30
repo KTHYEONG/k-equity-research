@@ -27,6 +27,39 @@ _CORRECTION_RE = re.compile(r"^\s*\[[^\]]*정정[^\]]*\]")
 _WITHDRAWAL_RE = re.compile(r"^\s*\[[^\]]*철회[^\]]*\]")
 
 
+# Routine filings that carry no new information about the issuer's value: ownership and governance
+# housekeeping, shareholder-meeting mechanics, and follow-up reports of an already-announced action.
+# Matching is by title prefix after removing correction tags; anything unlisted stays confounding (fail-closed).
+_ROUTINE_TITLE_PREFIXES = (
+    "임원ㆍ주요주주특정증권등소유상황보고서",
+    "주식등의대량보유상황보고서",
+    "최대주주등소유주식변동신고서",
+    "주주총회소집공고",
+    "주주총회소집결의",
+    "정기주주총회결과",
+    "임시주주총회결과",
+    "주주명부폐쇄기간또는기준일설정",
+    "현금ㆍ현물배당을위한주주명부폐쇄",
+    "의결권대리행사권유참고서류",
+    "자기주식취득결과보고서",
+    "자기주식처분결과보고서",
+    "감사보고서제출",
+    "기업설명회(IR)개최",
+    "독립이사의선임ㆍ해임또는중도퇴임에관한신고",
+    "기업지배구조보고서공시",
+    "지속가능경영보고서",
+    "동일인등출자계열회사와의상품ㆍ용역거래변경",
+    "기타시장안내",
+)
+_TITLE_TAG_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)+")
+
+
+def is_routine_disclosure(report_name: str) -> bool:
+    """Return whether a filing title is routine housekeeping that cannot confound a price reaction."""
+    normalized = re.sub(r"\s+", "", _TITLE_TAG_RE.sub("", report_name))
+    return normalized.startswith(_ROUTINE_TITLE_PREFIXES)
+
+
 @dataclass(frozen=True, slots=True)
 class DisclosureContextSummary:
     """Account for verified issuer-window list coverage and document gaps."""
@@ -100,31 +133,22 @@ def _ensure_schema(catalog: Catalog) -> None:
             )
 
 
-def _study_session_bounds(lake: LocalLake, receipt_date: date, policy: StudyPolicy) -> tuple[date, date] | None:
-    """Derive calendar bounds from the actual event-study sessions.
+def _outcome_bounds(lake: LocalLake, receipt_date: date, policy: StudyPolicy) -> tuple[date, date] | None:
+    """Return the filing date through the last outcome-horizon session.
 
-    Walk the verified session calendar back over the estimation span and
-    forward over the longest outcome horizon. No independent hardcoded
-    confound window is added.
+    Confounding is judged only over this span, so estimation-window filings are neither listed nor downloaded.
+    The end is derived from the verified session calendar, not from an independent hardcoded window.
     """
     safe = lake.next_session(receipt_date)
     if safe is None:
         return None
-    back_steps = max(0, -policy.estimation_start)
-    fwd_steps = max(0, max(policy.horizons) if policy.horizons else 0)
-    start = safe
-    for _ in range(back_steps):
-        previous = lake.previous_session(start)
-        if previous is None:
-            break
-        start = previous
     end = safe
-    for _ in range(fwd_steps):
+    for _ in range(max(0, max(policy.horizons) if policy.horizons else 0)):
         coming = lake.next_session(end)
         if coming is None:
             break
         end = coming
-    return (start, end)
+    return (receipt_date, end)
 
 
 def _split_request_window(start: date, end: date) -> list[tuple[date, date]]:
@@ -235,7 +259,7 @@ def verified_event_confound(
 ) -> tuple[Literal["KNOWN_CLEAR", "KNOWN_CONFOUNDED", "INCOMPLETE"], tuple[tuple[str, str, str], ...]]:
     """Classify an issuer outcome window only after every list page and document is verified."""
     _require_aware(as_of, "as_of")
-    bounds = _study_session_bounds(lake, receipt_date, policy)
+    bounds = _outcome_bounds(lake, receipt_date, policy)
     if bounds is None or as_of.astimezone(ZoneInfo("Asia/Seoul")).date() < bounds[1]:
         return "INCOMPLETE", ()
     stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
@@ -269,10 +293,14 @@ def verified_event_confound(
     entries = get_event_coverage(catalog, event_id, snapshot_id)
     found: dict[str, tuple[str, str, str]] = {}
     for entry in entries:
+        if (
+            not (receipt_date <= entry.receipt_date <= bounds[1])
+            or entry.rcept_no in excluded_receipts
+            or is_routine_disclosure(entry.report_name)
+        ):
+            continue
         if not entry.document_ok or not _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, entry.rcept_no):
             return "INCOMPLETE", ()
-        if not (receipt_date <= entry.receipt_date <= bounds[1]) or entry.rcept_no in excluded_receipts:
-            continue
         artifact = catalog.find_artifact("dart", _DOC_ENDPOINT, entry.rcept_no, snapshot_id)
         if artifact is None:
             return "INCOMPLETE", ()
@@ -354,7 +382,7 @@ def collect_event_disclosure_context(
     for link, original in prior_events:
         if catalog.get_filing_asof(original.rcept_no, as_of) is None:
             continue
-        bounds = _study_session_bounds(lake, original.receipt_date, policy)
+        bounds = _outcome_bounds(lake, original.receipt_date, policy)
         if bounds is None:
             continue
         window_start, window_end = bounds
@@ -386,6 +414,8 @@ def collect_event_disclosure_context(
                     discovered.add(rcept_no)
                     if _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no):
                         doc_ok.add(rcept_no)
+                        continue
+                    if is_routine_disclosure(str(info["report_name"])):
                         continue
                     try:
                         raw_zip = client.document_zip(rcept_no)
@@ -425,11 +455,9 @@ def collect_event_disclosure_context(
                                 " (event_id, snapshot_id, rcept_no) VALUES (?, ?, ?)",
                                 (event_id, snapshot_id, rcept_no),
                             )
-                for rcept_no in known:
-                    if rcept_no not in doc_ok:
+                for rcept_no, info in known.items():
+                    if rcept_no not in doc_ok and not is_routine_disclosure(str(info["report_name"])):
                         missing.add(rcept_no)
-                if missing:
-                    raise ValueError(f"incomplete DART documents for issuer window {window}")
                 continue
             done_pages, terminal = 0, False
 
@@ -459,7 +487,9 @@ def collect_event_disclosure_context(
             failed_here: list[str] = []
             for row in issuer_rows:
                 rcept_no = str(row.rcept_no)
-                if _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no):
+                if is_routine_disclosure(str(row.report_name)) or _artifact_valid(
+                    catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no
+                ):
                     zips.append(b"")
                     continue
                 try:
@@ -552,12 +582,19 @@ def collect_event_disclosure_context(
             page_no += 1
         if complete:
             known = _known_receipts(catalog, corp_code, chunk_start, chunk_end, snapshot_id)
-            if any(
-                info.get("document_ok") != 1
-                or not _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no)
+            unfinished = [
+                rcept_no
                 for rcept_no, info in known.items()
-            ):
-                raise ValueError(f"incomplete DART documents for issuer window {window}")
+                if not is_routine_disclosure(str(info["report_name"]))
+                and (
+                    info.get("document_ok") != 1
+                    or not _artifact_valid(catalog, data_root, snapshot_id, _DOC_ENDPOINT, rcept_no)
+                )
+            ]
+            if unfinished:
+                # The window stays non-terminal (fail-closed) while the remaining issuers keep collecting.
+                missing.update(unfinished)
+                continue
             # Reconcile the exact verified page count from durable artifacts.
             total_pages = 0
             probe = 1
@@ -583,9 +620,11 @@ def collect_event_disclosure_context(
                 info.get("document_ok") == 1
             ):
                 doc_ok.add(rcept_no)
-            else:
+            elif not is_routine_disclosure(str(info["report_name"])):
                 missing.add(rcept_no)
 
+    if missing - doc_ok:
+        raise ValueError(f"incomplete DART documents for {len(missing - doc_ok)} receipts: {sorted(missing - doc_ok)[:5]}")
     return DisclosureContextSummary(
         issuer_windows=issuer_windows,
         pages_verified=pages_verified,
@@ -600,5 +639,6 @@ __all__ = [
     "DisclosureContextSummary",
     "collect_event_disclosure_context",
     "get_event_coverage",
+    "is_routine_disclosure",
     "verified_event_confound",
 ]

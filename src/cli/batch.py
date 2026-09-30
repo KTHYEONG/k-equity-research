@@ -20,6 +20,7 @@ from src.data.imports import ImportManifest, ImportPart
 from src.data.index_store import IndexManifest, IndexStore, load_index_manifest, merge_index_manifest
 from src.data.local_lake import LocalLake
 from src.data.local_paths import checked_data_path, checked_local_path
+from src.integrations.dart import api_keys_from_environ
 from src.research.analogue_proof import build_analogue_proof
 from src.research.context import ResearchUnavailable, build_research_context
 from src.research.event_study import StudyPolicy
@@ -226,7 +227,7 @@ def _atomic_write_bytes(data_root: Path, target: Path, payload: bytes) -> None:
 def _try_dart_client() -> Any | None:
     import os as _os
 
-    key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    key = api_keys_from_environ(_os.environ)
     if not key:
         return None
     try:

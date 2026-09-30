@@ -30,7 +30,8 @@ RCEPT = "20240624000001"
 
 @pytest.fixture(autouse=True)
 def _isolate_source_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("OPENDART_API_KEY", "DART_API_KEY", "KRX_OPENAPI_KEY", "KRX_API_KEY"):
+    dart_names = ("OPENDART_API_KEY", *(f"OPENDART_API_KEY_{n}" for n in range(2, 10)), "DART_API_KEY")
+    for name in (*dart_names, "KRX_OPENAPI_KEY", "KRX_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
 

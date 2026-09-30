@@ -483,3 +483,30 @@ def test_unavailable_first_safe_pair_withholds_outcome(rig: dict[str, object]) -
     assert profile is not None
     assert profile.first_safe_intraday_excess is None
     assert profile.outcome_available_at is None
+
+
+def test_aggregate_outcomes_match_full_context_and_omit_unresolved(rig: dict[str, object]) -> None:
+    """The lean aggregate path reproduces the context study and drops only unresolved securities."""
+    from src.research.aggregate import collect_outcomes
+
+    as_of = datetime(2024, 6, 29, 18, 0, tzinfo=KST)
+    catalog, event_store = rig["catalog"], rig["event_store"]
+    seen: list[tuple[int, int]] = []
+    outcomes = collect_outcomes(
+        catalog, event_store, rig["lake"], rig["index_store"], as_of, POLICY,  # type: ignore[arg-type]
+        lambda done, total: seen.append((done, total)),
+    )
+    linked = event_store.list_prior_events(as_of)  # type: ignore[attr-defined]
+    assert len(outcomes) < len(linked)
+    assert seen
+    assert seen[-1] == (len(linked), len(linked))
+    by_id = {outcome.event_id: outcome for outcome in outcomes}
+    context = build_research_context(
+        catalog, event_store, rig["lake"], rig["financial"], rig["index_store"], RCEPT, as_of, POLICY,  # type: ignore[arg-type]
+    )
+    measured = by_id[context.event.event_id]
+    assert measured.horizon_car == dict(context.study.horizon_car)
+    assert measured.intraday_excess == context.study.intraday_excess
+    assert measured.status == context.study.status
+    assert measured.amount_ratio == context.materiality.amount_to_market_cap
+    assert measured.market == "KOSPI"

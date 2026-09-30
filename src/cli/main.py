@@ -119,6 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
     memo.add_argument("--agent-max-calls", type=int, default=3)
     memo.add_argument("--agent-prompt-version", default="v1")
     _add_data_root(memo)
+    aggregate = research_sub.add_parser("aggregate", help="Summarize event-study outcomes across all linked events.")
+    aggregate.add_argument("--as-of", required=True, help="Timezone-aware instant, e.g. 2026-09-29T18:32:00+09:00.")
+    aggregate.add_argument("--index-manifest", required=True)
+    _add_data_root(aggregate)
     repair = research_sub.add_parser("repair-memo", help="Rebuild one historical memo with verified analogue evidence.")
     repair.add_argument("--run-id", required=True)
     repair.add_argument("--index-manifest", required=True)
@@ -285,9 +289,9 @@ def _run_backfill_dart(args: argparse.Namespace) -> int:
     from src.data.dart_ingest import collect_buyback_history
     from src.data.event_store import EventStore
     from src.data.local_lake import LocalLake
-    from src.integrations.dart import DartClient
+    from src.integrations.dart import DartClient, api_keys_from_environ
 
-    api_key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    api_key = api_keys_from_environ(_os.environ)
     if not api_key:
         raise ValueError("DART API key must be set (OPENDART_API_KEY)")
     root = _resolve_data_root(args.data_root)
@@ -365,10 +369,10 @@ def _run_collect_disclosure_context(args: argparse.Namespace) -> int:
     from src.data.disclosure_context import collect_event_disclosure_context
     from src.data.event_store import EventStore
     from src.data.local_lake import LocalLake
-    from src.integrations.dart import DartClient
+    from src.integrations.dart import DartClient, api_keys_from_environ
     from src.research.event_study import StudyPolicy
 
-    api_key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    api_key = api_keys_from_environ(_os.environ)
     if not api_key:
         raise ValueError("DART API key must be set (OPENDART_API_KEY)")
     root = _resolve_data_root(args.data_root)
@@ -420,9 +424,9 @@ def _run_collect_financial(args: argparse.Namespace) -> int:
     import httpx
 
     from src.data.financial_ingest import collect_financial_snapshot
-    from src.integrations.dart import DartClient, FinancialStatementRequest
+    from src.integrations.dart import DartClient, FinancialStatementRequest, api_keys_from_environ
 
-    api_key = _os.environ.get("OPENDART_API_KEY") or _os.environ.get("DART_API_KEY", "")
+    api_key = api_keys_from_environ(_os.environ)
     if not api_key:
         raise ValueError("DART API key must be set (OPENDART_API_KEY)")
     root = _resolve_data_root(args.data_root)
@@ -684,6 +688,47 @@ def _run_research_memo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_research_aggregate(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from zoneinfo import ZoneInfo
+
+    from src.cli.batch import _read_import_manifests
+    from src.data.event_store import EventStore
+    from src.data.index_store import IndexStore, load_index_manifest
+    from src.data.local_lake import LocalLake
+    from src.data.local_paths import checked_local_path
+    from src.research.aggregate import aggregate_outcomes, collect_outcomes, render_report_markdown
+    from src.research.event_study import StudyPolicy
+
+    root = _resolve_data_root(args.data_root)
+    catalog = open_catalog(root)
+    as_of = datetime.fromisoformat(args.as_of)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as-of instant must be timezone-aware")
+    lake = LocalLake(root, _read_import_manifests(root))
+    manifest = load_index_manifest(root, args.index_manifest)
+    policy = StudyPolicy()
+
+    def _progress(done: int, total: int) -> None:
+        sys.stderr.write(f"[RESEARCH] aggregate progress events={done}/{total}\n")
+
+    event_store = EventStore(catalog)
+    outcomes = collect_outcomes(catalog, event_store, lake, IndexStore(catalog, root, manifest), as_of, policy, _progress)
+    report = aggregate_outcomes(
+        outcomes, as_of, policy.version, manifest.manifest_hash, len(event_store.list_prior_events(as_of))
+    )
+    stamp = as_of.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d-%H%M%S%z").replace("+", "p")
+    out_dir = checked_local_path(root, PurePosixPath("analysis") / f"aggregate-{stamp}-{manifest.manifest_hash[:12]}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    markdown = render_report_markdown(report)
+    (out_dir / "report.md").write_text(markdown, encoding="utf-8")
+    (out_dir / "report.json").write_text(
+        json.dumps(asdict(report), default=str, ensure_ascii=False, sort_keys=True, indent=1), encoding="utf-8"
+    )
+    sys.stdout.write(json.dumps({"events": report.coverage.total, "report": str(out_dir / "report.md")}) + "\n")
+    return 0
+
+
 def _run_research_repair_memo(args: argparse.Namespace) -> int:
     from src.research.repair import repair_memo_evidence
 
@@ -846,6 +891,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_extract_archive(args)
         if args.command == "research" and args.research_command == "memo":
             return _run_research_memo(args)
+        if args.command == "research" and args.research_command == "aggregate":
+            return _run_research_aggregate(args)
         if args.command == "research" and args.research_command == "repair-memo":
             return _run_research_repair_memo(args)
         if args.command == "eval" and args.eval_command == "replay":

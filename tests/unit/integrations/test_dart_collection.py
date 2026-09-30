@@ -621,3 +621,71 @@ def test_transport_exhaustion_and_status() -> None:
     with pytest.raises(DartSourceError) as denied_info:
         _mock_client(_denied).document_zip("20240531000001")
     assert denied_info.value.retryable is False
+
+
+def _keyed_client(quota_keys: set[str], seen: list[str], keys: tuple[str, ...]) -> DartClient:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        key = request.url.params["crtfc_key"]
+        seen.append(key)
+        if request.url.path.endswith("document.xml"):
+            if key in quota_keys:
+                return httpx.Response(200, content=b"<result><status>020</status></result>")
+            return httpx.Response(200, content=_zip_bytes(b"x"))
+        if key in quota_keys:
+            return httpx.Response(200, json={"status": "020", "message": "limited"})
+        return httpx.Response(200, json={"status": "010", "message": "no data"})
+
+    return DartClient(keys, httpx.Client(transport=httpx.MockTransport(_handler)))
+
+
+def test_quota_response_rotates_to_next_key_and_remembers_exhaustion() -> None:
+    seen: list[str] = []
+    client = _keyed_client({"K1"}, seen, ("K1", "K2"))
+    assert client.list_reports(date(2024, 5, 30), date(2024, 6, 4), 1).rows == ()
+    assert client.list_reports(date(2024, 5, 30), date(2024, 6, 4), 1).rows == ()
+    assert seen == ["K1", "K2", "K2"]
+
+
+def test_document_quota_rotates_and_all_keys_exhausted_is_retryable_failure() -> None:
+    seen: list[str] = []
+    client = _keyed_client({"K1"}, seen, ("K1", "K2"))
+    assert client.document_zip("20240601000001").startswith(b"PK")
+    assert seen == ["K1", "K2"]
+    exhausted = _keyed_client({"K1", "K2"}, [], ("K1", "K2"))
+    with pytest.raises(DartSourceError) as info:
+        exhausted.document_zip("20240601000001")
+    assert (info.value.status, info.value.retryable) == ("020", True)
+    with pytest.raises(DartSourceError) as listed:
+        _keyed_client({"K1", "K2"}, [], ("K1", "K2")).list_reports(date(2024, 5, 30), date(2024, 6, 4), 1)
+    assert listed.value.retryable is True
+
+
+@pytest.mark.parametrize("keys", [(), ("",), ("A", "A")])
+def test_client_rejects_empty_or_duplicate_keys(keys: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="distinct"):
+        DartClient(keys, httpx.Client())
+
+
+def test_api_keys_from_environ_orders_dedupes_and_ignores_blank() -> None:
+    from src.integrations.dart import api_keys_from_environ
+
+    environ = {
+        "OPENDART_API_KEY": "A",
+        "OPENDART_API_KEY_3": "C",
+        "OPENDART_API_KEY_2": " B ",
+        "OPENDART_API_KEY_4": "",
+        "DART_API_KEY": "A",
+    }
+    assert api_keys_from_environ(environ) == ("A", "B", "C")
+    assert api_keys_from_environ({}) == ()
+
+
+def test_absent_document_file_is_a_permanent_classified_failure() -> None:
+    def _absent(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=b"<result><status>014</status><message>x</message></result>")
+
+    client = DartClient("K", httpx.Client(transport=httpx.MockTransport(_absent)))
+    with pytest.raises(DartSourceError) as info:
+        client.document_zip("20241014000004")
+    assert (info.value.status, info.value.retryable) == ("014", False)

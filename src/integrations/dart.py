@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
@@ -125,14 +126,45 @@ def _build_row(item: Any) -> DartListRow:
     )
 
 
+def api_keys_from_environ(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """Collect distinct OpenDART keys in order: OPENDART_API_KEY, OPENDART_API_KEY_2..9, then legacy DART_API_KEY."""
+    names = ["OPENDART_API_KEY", *(f"OPENDART_API_KEY_{n}" for n in range(2, 10)), "DART_API_KEY"]
+    keys: list[str] = []
+    for name in names:
+        value = environ.get(name, "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    return tuple(keys)
+
+
 class DartClient:
     """Authenticated OpenDART collection client with bounded retry."""
 
-    def __init__(self, api_key: str, http_client: httpx.Client) -> None:
-        if not api_key:
-            raise ValueError("api key must be non-empty")
-        self._api_key = api_key
+    def __init__(self, api_key: str | Sequence[str], http_client: httpx.Client) -> None:
+        keys = (api_key,) if isinstance(api_key, str) else tuple(api_key)
+        if not keys or any(not key for key in keys) or len(set(keys)) != len(keys):
+            raise ValueError("api keys must be non-empty and distinct")
+        self._keys = keys
+        self._key_index = 0
+        self._exhausted: set[int] = set()
         self._client = http_client
+
+    @property
+    def _api_key(self) -> str:
+        return self._keys[self._key_index]
+
+    def _rotate_key(self) -> bool:
+        """Retire the current key after a daily-quota response and switch to the next unexhausted one.
+
+        Exhaustion is remembered for the client's lifetime because OpenDART quotas reset daily, not per call.
+        """
+        self._exhausted.add(self._key_index)
+        for offset in range(1, len(self._keys) + 1):
+            candidate = (self._key_index + offset) % len(self._keys)
+            if candidate not in self._exhausted:
+                self._key_index = candidate
+                return True
+        return False
 
     def __repr__(self) -> str:
         return "DartClient(<redacted>)"
@@ -207,6 +239,10 @@ class DartClient:
             if status == "010":
                 return DartListPage(page_no=page, page_count=0, total_count=0, raw_bytes=raw, rows=())
             if status == "020":
+                if self._rotate_key():
+                    params["crtfc_key"] = self._api_key
+                    attempts -= 1
+                    continue
                 if attempts >= _MAX_ATTEMPTS:
                     raise DartSourceError(status, True, message or "dart quota exceeded")
                 continue
@@ -256,6 +292,14 @@ class DartClient:
             if response.status_code != 200:
                 raise DartSourceError("TRANSPORT", False, "dart document transport failure")
             raw = bytes(response.content)
+            if not raw.startswith(b"PK") and b"<status>020</status>" in raw:
+                if self._rotate_key():
+                    params["crtfc_key"] = self._api_key
+                    attempts -= 1
+                    continue
+                raise DartSourceError("020", True, "dart quota exceeded")
+            if not raw.startswith(b"PK") and b"<status>014</status>" in raw:
+                raise DartSourceError("014", False, "dart document file does not exist")
             if len(raw) < 4 or not raw.startswith(b"PK"):
                 raise DartSourceError("SCHEMA", False, "dart document schema failure")
             return raw
@@ -334,6 +378,10 @@ class DartClient:
             if status == "013":
                 raise DartSourceError(status, False, message or "dart financial no data")
             if status == "020":
+                if self._rotate_key():
+                    params["crtfc_key"] = self._api_key
+                    attempts -= 1
+                    continue
                 if attempts >= _MAX_ATTEMPTS:
                     raise DartSourceError(status, True, message or "dart quota exceeded")
                 continue
