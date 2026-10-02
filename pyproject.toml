@@ -101,8 +101,6 @@ exclude = [
     ".venv"
 ]
 
-[tool.uv]
-cache-dir = "tmp/uv-cache"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
