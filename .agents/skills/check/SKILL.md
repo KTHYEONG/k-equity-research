@@ -10,8 +10,8 @@ Senior-level adversarial code auditor combining **fast mechanical verification**
 ## Directives
 
 1. **Target Scoping & Spec-Independence**:
-   - Scope targets automatically via `git status --short` / `git diff HEAD`, or inspect user-specified files/modules.
-   - **Specs Are Strictly Optional Context**: If an active spec (`docs/specs/*_spec.md`) exists, cross-reference contract adherence against it. If NO spec exists, audit code directly against codebase architecture, domain invariants, and engineering standards.
+   - Scope targets automatically via working tree changes (`git status --short` / `git diff HEAD`), or inspect the most recent commit (`git show HEAD`) if the working tree is already clean.
+   - **Specs Are Strictly Optional Context**: When given explicit target specs or modules, cross-reference contract adherence against them while leaving other pending specs uninspected. If NO spec exists, audit code directly against codebase architecture, domain invariants, and engineering standards.
 
 2. **Step 1: Fast Mechanical Verification Gate**:
    - Run the project's native verification toolchain declared in `AGENTS.md` under `Project Toolchain` (or detected via repo manifests, e.g. `pytest`, `cargo test`, `pnpm test`, `go test`, `make check`):

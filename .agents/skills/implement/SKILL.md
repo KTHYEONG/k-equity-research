@@ -20,6 +20,7 @@ Atomic code implementation protocol delivering verified, production-ready change
 
 3. **Single-Gate Verification**:
    - Run the project's native verification toolchain declared in `AGENTS.md` under `Project Toolchain` (or project runner).
+   - **Scoped Toolchain Targeting**: When unrelated uncommitted changes exist in the working tree, constrain verification targets strictly to modified files and their direct test suites to maintain instant feedback and prevent cascading test overhead.
    - Ensure all tests pass with zero static analysis or type regressions.
    - If verification reports failures, isolate and fix only the flagged points.
 
