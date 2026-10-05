@@ -406,11 +406,11 @@ def main() -> None:
         xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
 
     src_files = [f for f in py_files if f.startswith("src/")]
-    cov_json_path = "tmp/verify_coverage.json"
+    cov_json_path = "scratch/verify_coverage.json"
     cov_args: list[str] = []
 
     if src_files and not args.no_cov:
-        os.makedirs("tmp", exist_ok=True)
+        os.makedirs("scratch", exist_ok=True)
         with contextlib.suppress(OSError):
             os.remove(cov_json_path)
         pkgs = {f.split("/")[1] for f in src_files if len(f.split("/")) >= 2}

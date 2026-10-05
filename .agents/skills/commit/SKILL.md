@@ -15,9 +15,10 @@ Fast automated git execution protocol enforcing atomic commits, bisect-safe chan
    - Do NOT perform blind blanket staging (`git add .` or `git add -A`) when unrelated working tree modifications exist.
    - Do not stage ephemeral artifacts: `scratch/`, `tmp/`, local build/test caches, compiled binaries/bytecode, or logs.
    - **Specs Are Gitignored**: `docs/specs/` is gitignored by contract. Specs serve as model/tool handoff blueprints and must never be forced into VCS staging.
-   - **Immediate Post-Commit Spec Cleanup**:
+   - **Immediate Post-Commit Cleanup (Specs & Scratch)**:
      - Upon successful commit, immediately delete the completed blueprint file (e.g., `rm docs/specs/<spec>.md`) tied to the committed scope.
-     - **Zero Confirmation**: Delete immediately without asking user confirmation or warning about untracked deletion—specs are designed as ephemeral handoffs. Preserve other pending specifications.
+     - Clean up temporary diagnostic/experiment scripts and artifacts created under `scratch/` for the committed task (or purge transient files in `scratch/`).
+     - **Zero Confirmation**: Delete immediately without asking user confirmation or warning about untracked deletion—specs and scratch files are designed as ephemeral handoffs. Preserve other pending specifications.
 
 2. **Commit Type Determination**:
    - Determine `<type>` based on the primary nature of the core changes:
