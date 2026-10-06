@@ -3,51 +3,38 @@ name: check
 description: Universal code review and multi-lens quality verification auditor.
 ---
 
-# Universal Code Review & Quality Audit Protocol
+# Check Protocol
 
-Senior-level adversarial code auditor combining **fast mechanical verification** with **deep cognitive AI code review**. Completely decoupled from specific scripts or spec files. Operates on any `git diff`, working tree, or designated targets across any programming language.
+Senior adversarial code auditor combining fast toolchain verification with cognitive review. Operates autonomously on working tree changes or recent commits.
 
 ## Directives
 
-1. **Target Scoping & Spec-Independence**:
-   - Scope targets automatically via working tree changes (`git status --short` / `git diff HEAD`), or inspect the most recent commit (`git show HEAD`) if the working tree is already clean.
-   - **Specs Are Strictly Optional Context**: When given explicit target specs or modules, cross-reference contract adherence against them while leaving other pending specs uninspected. If NO spec exists, audit code directly against codebase architecture, domain invariants, and engineering standards.
+1. **Target Scoping**:
+   - Scope targets via `git status --short` / `git diff HEAD` (or `git show HEAD` if clean). Specs provide optional context; audit against codebase architecture and domain invariants.
 
-2. **Step 1: Fast Mechanical Verification Gate**:
-   - Run the project's native verification toolchain declared in `AGENTS.md` under `Project Toolchain` (or detected via repo manifests, e.g. `pytest`, `cargo test`, `pnpm test`, `go test`, `make check`):
-     - Compilation/syntax, static typing, linter adherence, and test suites.
-   - **Token-Conscious Output Policy**:
-     - *On Success*: Suppress raw terminal dumps. Output only a compact 1-line badge (e.g. `Build clean · 42 tests passed`).
-     - *On Failure*: Extract and report only the failing file, line number, and core error message (1-2 lines) to keep context lean.
+2. **Toolchain Gate & Adversarial Audit**:
+   - Run the project's native verification toolchain (build, lint, typecheck, test suites) detected via repo manifests or project guidelines.
+   - Adversarially evaluate: causal ordering, fail-closed error handling, boundary/numerical robustness, blast radius, and test authenticity.
 
-3. **Step 2: Adversarial Cognitive Code Review (4 Core Lenses)**:
-   Adopt an adversarial reviewer mindset (*"If this causes a production outage, where is the flaw?"*):
-   1) **State & Causal Integrity**: Verify chronological ordering, zero state leaks, conservation laws, and numerical/boundary robustness.
-   2) **Fail-Closed Robustness**: Reject swallowed exceptions and arbitrary fallback defaults. Fail safely and explicitly.
-   3) **Blast Radius & Ripple Effects**: Ensure modified signatures, shared state, or lifecycle resources do not break upstream callers.
-   4) **Test Authenticity**: Verify tests assert genuine state transformations and domain invariants rather than vacuous tautologies or over-mocking.
+3. **Autonomous Remediation Loop**:
+   - **Fix before reporting**: Autonomously resolve any deterministic defects (lint, types, missing guards, unhandled edge cases, test coverage gaps).
+   - Re-run verification to confirm clean state. Do not leave actionable comments on fixable code.
 
-4. **Step 3: Autonomous Remediation (Review-Fix-Verify Loop)**:
-   - For minor or deterministic findings (lint/format issues, unused imports, missing boundary assertions, leftover debug statements):
-     - Apply surgical pinpoint fixes immediately.
-     - Re-run the mechanical gate to ensure green status.
-     - Note the fix in the final review summary.
-   - For structural or architectural flaws, do NOT guess—report them clearly as Blockers.
+4. **Binary Verdict Threshold**:
+   - **`✅ APPROVED`**: Verification clean and all review findings resolved/remediated. Zero human action required.
+   - **`🚨 ACTION REQUIRED`**: Reserved strictly for unresolvable blockers requiring human judgment (domain/policy trade-offs, conflicting requirements, or external credentials/access).
 
-5. **Non-Destructive Audit Rule**:
-   - Never delete, rename, or purge specifications, test files, persistent configurations, or user files. Auditing is strictly non-destructive.
+5. **Non-Destructive**: Never delete, rename, or purge specs, test suites, configs, or user data.
 
-## Chat Output Format
+## Output
 
-Keep output concise, actionable, and token-efficient. Retain English badges/keys while writing descriptions in natural Korean (한국어):
+Return ONLY the minimal summary card below. Do NOT append conversational prose, preamble, or review commentary:
 
-### 🛡️ [CHECK] <Target / Module / Diff Scope>
-> 🚦 **Verdict**: [✅ APPROVED | 🟡 APPROVED WITH COMMENTS | ❌ CHANGES REQUESTED]
+### 🛡️ [CHECK] <Scope>
+> 🚦 **Verdict**: [✅ APPROVED (<toolchain summary>) | 🚨 ACTION REQUIRED]
 
-- 🧪 **Toolchain**: <컴파일 · 린트 · 테스트 N건 통과 요약 (로그 은닉)>
-- 🔍 **Adversarial Review**:
-  - 🚨 **Blockers**: <인과성 위반, 심각한 버그, 계약 파기 (없으면 '없음')>
-  - ⚠️ **Risks & Edge Cases**: <예외 은폐, 엣지케이스 미처리, 파급 효과 주의점 (없으면 '없음')>
-  - 🧪 **Test Efficacy**: <테스트 단언문의 실질성 및 보강 필요 시나리오 (충분하면 '완전')>
-*(Optional, only if auto-remediation was performed)*:
-- 🔧 **Auto-Remediated**: <적용한 정밀 수정 1줄 요약 및 재검증 완료 보고>
+*(Include ONLY if code/tests were auto-remediated)*:
+- 🔧 **Fixed**: <자가 수정한 항목 1줄 요약>
+
+*(Include ONLY if ACTION REQUIRED)*:
+- 🚨 **Decision Needed**: <인간 개입이 필요한 구체적 이유 및 선택지>
