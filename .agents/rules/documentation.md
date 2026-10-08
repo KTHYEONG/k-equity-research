@@ -7,6 +7,7 @@
 - **Rationale-Only Standard:** Write comments exclusively for non-obvious design trade-offs and external constraints that cannot be expressed in code. Omit all mechanical paraphrasing, procedural steps, and session metadata.
 
 ## 2. Interface Documentation Standards
+- **Caller Contracts, Not Spec Echoes:** Docstrings are compact (1–2 lines) caller contracts (inputs, returns, raised errors). Never paste specification narratives, task metadata, or implementation steps into docstrings or comments.
 - **Contract-Driven Documentation:** Document public interfaces when behavior, side effects, units, timing assumptions, or failure conditions are not self-evident from type signatures and names.
 - **Consistent Semantic Convention:** Follow established semantic conventions documenting input contracts, return guarantees, side effects, and thrown errors. Avoid conversational prose or historical journaling.
 - **Private Helpers:** Omit interface documentation for private helper functions unless the algorithmic logic is complex or non-trivial.

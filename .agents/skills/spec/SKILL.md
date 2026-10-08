@@ -11,7 +11,7 @@ Produce an unambiguous implementation blueprint (`docs/specs/<feature>_spec.md`)
 
 The design rationale, user requirements, and technical boundaries may come from user discussion, codebase inspection, or an exploratory probe.
 Your output in `/spec` focuses strictly on:
-1. **Target Interfaces & Invariants**: Exact signatures, finalized production docstrings (explaining Why and constraints), and bulleted core invariants. Do not include temporary pseudo-code, code skeletons, or recipes in docstrings or invariants (prevents model anchoring and scaffolding leaks).
+1. **Target Interfaces & Invariants**: Exact signatures with concise 1-line interface docstrings, paired with detailed bulleted invariants (domain constraints, calculation sequence, negative constraints, edge cases). Never embed design narratives or task context inside docstrings.
 2. **Wiring Points**: Caller anchor and invocation snippet.
 3. **Invariant Verification Scenarios**: Concrete scenarios (Given / When / Invariant) validating contracts without freezing internal test syntax prematurely.
 
@@ -29,8 +29,8 @@ Your output in `/spec` focuses strictly on:
    Organize targets with **component-centric co-location** (group Target, Wiring, and Invariant Scenarios together per component to prevent cross-referencing context loss). For multi-component specs, repeat this 3-part sequence for each component unit:
 
    ### A. Target Blueprint (`## Target: <relative_path>`)
-   - Function/class/interface signature with finalized production interface documentation (domain context, inputs, returns, thrown errors).
-   - Core Invariants: bulleted preconditions, calculation sequence, negative constraints ("Do NOT..."), edge case handling, and postconditions.
+   - Function/class/interface signature with a concise 1-line interface docstring (inputs/returns/errors contract only).
+   - Core Invariants: detailed operational logic (preconditions, calculation sequence, negative constraints "Do NOT...", edge case handling, and postconditions). Keep all implementation instructions here, never in the docstring.
    - **No Code Skeletons**: Specify strict types and invariants only; do not provide implementation code snippets or algorithms to avoid model overfitting.
 
    ### B. Wiring Blueprint (`## Wiring: <caller_file>`)

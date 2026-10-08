@@ -24,9 +24,9 @@ Atomic code implementation protocol delivering verified, production-ready change
    - Ensure all tests pass with zero static analysis or type regressions.
    - If verification reports failures, isolate and fix only the flagged points.
 
-4. **Production Hygiene & Minimal Comments**:
-   - Write clean, self-documenting code. Never write line-by-line mechanical restatements, step-by-step narratives, or obvious algorithmic commentary. Limit comments to non-obvious external constraints or design trade-offs in concise Technical English.
-   - Production code and docstrings must contain only finalized implementations. Never paste temporary spec directives, step numbers, or scratch commentary into production files.
+4. **Production Hygiene & Zero Spec Echoing**:
+   - **Invariants as Code**: Translate spec invariants, constraints, and sequences directly into executable Python logic (guards, calculations, assertions)—never echo or paste spec text into comments or docstrings.
+   - **Minimal Docstrings**: Keep docstrings to concise 1–2 lines describing the public interface contract. Never include spec rationale, task references, or step numbers. Zero inline comments unless explaining non-obvious external constraints.
    - Focus tests on meaningful domain transformations and boundary conditions; prune dead defensive branches rather than writing vacuous tests.
 
 ## Chat Output Format
